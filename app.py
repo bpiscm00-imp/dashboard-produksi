@@ -62,6 +62,15 @@ def clean_data(df_qc, df_sic, df_oee):
     if 'NAMA_MESIN' in df_sic.columns: df_sic['NAMA_MESIN'] = df_sic['NAMA_MESIN'].astype(str).str.strip().str.title()
     if 'PROSES' in df_oee.columns: df_oee['NAMA_MESIN'] = df_oee['PROSES'].astype(str).str.strip().str.title()
 
+    with st.spinner("Menarik dan membersihkan data dari Google Sheets..."):
+        raw_qc, raw_sic, raw_oee, df_target = load_data()
+        df_qc, df_sic, df_oee, df_anomali_double, df_anomali_batch = clean_data(raw_qc, raw_sic, raw_oee)
+
+    # SIMPAN COPY FULL SEBELUM TERKENA FILTER TANGGAL GLOBAL (UNTUK TREN BULANAN QC)
+    df_qc_full = df_qc.copy()
+    df_sic_full = df_sic.copy()
+    df_oee_full = df_oee.copy()
+
     # ==========================================
     # 2. IDENTIFIKASI & CROSS-FILL NO BATCH KOSONG
     # ==========================================
@@ -713,7 +722,7 @@ try:
         st.subheader("🔍 Ringkasan Performance Kualitas & Analisis Defect (QC)")
 
         # ---------------------------------------------------------
-        # 1. SUMMARY KPI METRICS QC
+        # 1. SUMMARY KPI METRICS QC (Mengikuti Filter Tanggal Global)
         # ---------------------------------------------------------
         tot_reject = pd.to_numeric(df_qc['REJECT_PCS'], errors='coerce').fillna(0).sum() if 'REJECT_PCS' in df_qc.columns else 0
         tot_reproses = pd.to_numeric(df_qc['REPROSES_PCS'], errors='coerce').fillna(0).sum() if 'REPROSES_PCS' in df_qc.columns else 0
@@ -731,21 +740,98 @@ try:
         st.markdown("---")
 
         # ---------------------------------------------------------
-        # 2. GRAFIK VOLUME DEFECT PER MESIN & SUBBRAND
+        # 2. TREN BULANAN REJECT & REPROSES RATE (BYPASS FILTER TANGGAL GLOBAL)
+        # ---------------------------------------------------------
+        st.markdown("### 📈 Tren Bulanan Reject Rate & Reproses Rate ( Keseluruhan Periode Data )")
+        
+        # Persiapan Data Full (Bypass Filter Tanggal)
+        df_qc_temp_full = df_qc_full.copy()
+        df_qc_temp_full['NO_BATCH_KEY'] = df_qc_temp_full['NO_BATCH'].astype(str).str.strip()
+        df_qc_temp_full['NAMA_MESIN_KEY'] = df_qc_temp_full['NAMA_MESIN'].astype(str).str.strip().str.title()
+        df_qc_temp_full['NO_MESIN_LINE_KEY'] = df_qc_temp_full['NO_MESIN_LINE'].astype(str).str.strip().str.replace('.0', '', regex=False) if 'NO_MESIN_LINE' in df_qc_temp_full.columns else ''
+        df_qc_temp_full['REJECT_PCS'] = pd.to_numeric(df_qc_temp_full['REJECT_PCS'], errors='coerce').fillna(0)
+        df_qc_temp_full['REPROSES_PCS'] = pd.to_numeric(df_qc_temp_full['REPROSES_PCS'], errors='coerce').fillna(0)
+
+        qc_grouped_full = df_qc_temp_full.groupby(['NO_BATCH_KEY', 'NAMA_MESIN_KEY', 'NO_MESIN_LINE_KEY']).agg({
+            'REJECT_PCS': 'sum',
+            'REPROSES_PCS': 'sum'
+        }).reset_index()
+
+        df_oee_perf_full = df_oee_full.copy()
+        df_oee_perf_full['NO_BATCH_KEY'] = df_oee_perf_full['NO_BATCH'].astype(str).str.strip()
+        df_oee_perf_full['NAMA_MESIN_KEY'] = df_oee_perf_full['NAMA_MESIN'].astype(str).str.strip().str.title()
+        if 'NO_MESIN_LINE' in df_oee_perf_full.columns:
+            df_oee_perf_full['NO_MESIN_LINE_KEY'] = df_oee_perf_full['NO_MESIN_LINE'].astype(str).str.strip().str.replace('.0', '', regex=False)
+        elif 'MESIN_FULL' in df_oee_perf_full.columns:
+            df_oee_perf_full['NO_MESIN_LINE_KEY'] = df_oee_perf_full['MESIN_FULL'].astype(str).str.extract(r'(\d+)')[0].fillna('')
+        else:
+            df_oee_perf_full['NO_MESIN_LINE_KEY'] = ''
+
+        df_oee_perf_full = df_oee_perf_full.merge(qc_grouped_full, on=['NO_BATCH_KEY', 'NAMA_MESIN_KEY', 'NO_MESIN_LINE_KEY'], how='left')
+        df_oee_perf_full['REJECT_PCS'] = pd.to_numeric(df_oee_perf_full['REJECT_PCS'], errors='coerce').fillna(0)
+        df_oee_perf_full['REPROSES_PCS'] = pd.to_numeric(df_oee_perf_full['REPROSES_PCS'], errors='coerce').fillna(0)
+        df_oee_perf_full['CAPAIN_PRODUKSI_PCS'] = pd.to_numeric(df_oee_perf_full['CAPAIN_PRODUKSI_PCS'], errors='coerce').fillna(0)
+
+        # Dropdown Filter Jenis Mesin (Khusus Filling & Press)
+        list_mesin_qc = sorted(df_oee_perf_full[df_oee_perf_full['NAMA_MESIN_KEY'].str.contains('Filling|Press', case=False, na=False)]['NAMA_MESIN_KEY'].unique().tolist())
+        pilih_mesin_qc_bulanan = st.selectbox("Pilih Jenis Mesin untuk Tren Bulanan QC:", list_mesin_qc, key="sb_mesin_qc_bulanan")
+
+        # Agregasi Bulanan
+        df_qc_monthly = df_oee_perf_full[df_oee_perf_full['NAMA_MESIN_KEY'].str.upper() == pilih_mesin_qc_bulanan.upper()].copy()
+        df_qc_monthly['BULAN_TAHUN'] = df_qc_monthly['TIMESTAMP'].dt.strftime('%Y-%m')
+
+        monthly_summary = df_qc_monthly.groupby('BULAN_TAHUN').agg({
+            'CAPAIN_PRODUKSI_PCS': 'sum',
+            'REJECT_PCS': 'sum',
+            'REPROSES_PCS': 'sum'
+        }).reset_index()
+
+        monthly_summary['GROSS_OUTPUT'] = monthly_summary['CAPAIN_PRODUKSI_PCS'] + monthly_summary['REJECT_PCS'] + monthly_summary['REPROSES_PCS']
+        monthly_summary['Reject Rate (%)'] = monthly_summary.apply(lambda r: (r['REJECT_PCS'] / r['GROSS_OUTPUT'] * 100) if r['GROSS_OUTPUT'] > 0 else 0.0, axis=1).round(2)
+        monthly_summary['Reproses Rate (%)'] = monthly_summary.apply(lambda r: (r['REPROSES_PCS'] / r['GROSS_OUTPUT'] * 100) if r['GROSS_OUTPUT'] > 0 else 0.0, axis=1).round(2)
+
+        monthly_summary = monthly_summary.sort_values(by='BULAN_TAHUN')
+
+        # Tampilan Line Chart Tren Bulanan
+        col_m1, col_m2 = st.columns(2)
+        with col_m1:
+            st.markdown(f"**Tren Bulanan Reject Rate (%) - {pilih_mesin_qc_bulanan}**")
+            if not monthly_summary.empty:
+                fig_rej_m = px.line(monthly_summary, x='BULAN_TAHUN', y='Reject Rate (%)', markers=True, color_discrete_sequence=['#EF553B'],
+                                    labels={'BULAN_TAHUN': 'Bulan', 'Reject Rate (%)': 'Reject Rate (%)'})
+                fig_rej_m.update_traces(hovertemplate='Bulan: %{x}<br>Reject Rate: %{y:.2f}%<extra></extra>')
+                fig_rej_m.update_layout(height=350)
+                st.plotly_chart(fig_rej_m, use_container_width=True)
+            else:
+                st.info("Data tren bulanan belum tersedia.")
+
+        with col_m2:
+            st.markdown(f"**Tren Bulanan Reproses Rate (%) - {pilih_mesin_qc_bulanan}**")
+            if not monthly_summary.empty:
+                fig_rep_m = px.line(monthly_summary, x='BULAN_TAHUN', y='Reproses Rate (%)', markers=True, color_discrete_sequence=['#FECB52'],
+                                    labels={'BULAN_TAHUN': 'Bulan', 'Reproses Rate (%)': 'Reproses Rate (%)'})
+                fig_rep_m.update_traces(hovertemplate='Bulan: %{x}<br>Reproses Rate: %{y:.2f}%<extra></extra>')
+                fig_rep_m.update_layout(height=350)
+                st.plotly_chart(fig_rep_m, use_container_width=True)
+            else:
+                st.info("Data tren bulanan belum tersedia.")
+
+        st.markdown("---")
+
+        # ---------------------------------------------------------
+        # 3. GRAFIK VOLUME DEFECT PER MESIN & SUBBRAND (Sesuai Filter Tanggal Global)
         # ---------------------------------------------------------
         col_q1, col_q2 = st.columns(2)
 
         with col_q1:
             st.markdown("**1. Volume Defect per Jenis Mesin (Khusus Filling & Press)**")
             if 'NAMA_MESIN_KEY' in df_oee_perf.columns:
-                # Filter HANYA mesin Filling & Press (Samakan dengan Tab 1)
                 kondisi_fp_qc = df_oee_perf['NAMA_MESIN_KEY'].astype(str).str.contains('Filling|Press', case=False, na=False)
                 df_defect_mesin = df_oee_perf[kondisi_fp_qc].groupby('NAMA_MESIN_KEY').agg({
                     'REJECT_PCS': 'sum',
                     'REPROSES_PCS': 'sum'
                 }).reset_index()
                 
-                # Melt dataframe untuk membuat Stacked Bar Chart
                 df_defect_melted = df_defect_mesin.melt(
                     id_vars=['NAMA_MESIN_KEY'], 
                     value_vars=['REJECT_PCS', 'REPROSES_PCS'],
@@ -793,7 +879,7 @@ try:
         st.markdown("---")
 
         # ---------------------------------------------------------
-        # 3. PARETO ALASAN REJECT & DEEP DIVE BATCH
+        # 4. PARETO ALASAN REJECT & DEEP DIVE BATCH
         # ---------------------------------------------------------
         col_qc1, col_qc2 = st.columns(2)
 
