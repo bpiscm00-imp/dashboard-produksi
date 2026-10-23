@@ -10,43 +10,41 @@ st.set_page_config(page_title="Dashboard Produksi", layout="wide")
 @st.cache_resource
 def init_connection():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    
-    # Membaca kredensial dari Streamlit Secrets
     if "gcp_service_account" in st.secrets:
         creds_dict = dict(st.secrets["gcp_service_account"])
-        # Memastikan karakter newline (\n) pada private_key terbaca dengan benar
         if "private_key" in creds_dict:
             creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     else:
-        # Fallback lokal jika dijalankan di komputer sendiri
         creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-        
-    client = gspread.authorize(creds)
-    return client
+    return gspread.authorize(creds)
 
 @st.cache_data(ttl=600)
 def load_data():
     client = init_connection()
     sheet = client.open("Raw Data - Produksi - Cleansing") 
     
-    data_qc = sheet.worksheet("QC").get_all_records()
-    data_sic = sheet.worksheet("SIC").get_all_records()
-    data_oee = sheet.worksheet("OEE").get_all_records()
-    data_target = sheet.worksheet("Master_Target").get_all_records()
-    
-    df_qc = pd.DataFrame(data_qc)
-    df_sic = pd.DataFrame(data_sic)
-    df_oee = pd.DataFrame(data_oee)
-    df_target = pd.DataFrame(data_target)
+    df_qc = pd.DataFrame(sheet.worksheet("QC").get_all_records())
+    df_sic = pd.DataFrame(sheet.worksheet("SIC").get_all_records())
+    df_oee = pd.DataFrame(sheet.worksheet("OEE").get_all_records())
+    df_target = pd.DataFrame(sheet.worksheet("Master_Target").get_all_records())
           
     return df_qc, df_sic, df_oee, df_target
 
-@st.cache_data
+@st.cache_data(ttl=600)
 def clean_data(df_qc, df_sic, df_oee):
-    # ==========================================
-    # 1. PERBAIKAN FORMAT TIMESTAMP & NAMA MESIN AWAL
-    # ==========================================
+    # ---------------------------------------------------------
+    # 1. PAKSA PENYESUAIAN TIPE DATA UTAMA (CEGAH PYARROW ERROR)
+    # ---------------------------------------------------------
+    for df in [df_qc, df_sic, df_oee]:
+        for col in ['NO_BATCH', 'NAMA_MESIN', 'SUBBRAND', 'VARIAN_PRODUK', 'NO_MESIN_LINE', 'MESIN_FULL', 'PROSES']:
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+                df[col] = df[col].replace({'nan': '', 'None': '', 'NaN': '', '<NA>': ''})
+
+    # ---------------------------------------------------------
+    # 2. STANDARDISASI TIMESTAMP & RE-NAME
+    # ---------------------------------------------------------
     def fix_timestamp(ts_series):
         ts_clean = ts_series.astype(str).str.replace(',', '', regex=False).str.replace('.', ':', regex=False)
         return pd.to_datetime(ts_clean, dayfirst=True, format='mixed', errors='coerce')
@@ -57,56 +55,39 @@ def clean_data(df_qc, df_sic, df_oee):
     
     df_sic = df_sic.rename(columns={'Timestamp': 'TIMESTAMP'})
 
-    # Seragamkan nama mesin lebih awal agar bisa mendeteksi "Timbang"
-    if 'NAMA_MESIN' in df_qc.columns: df_qc['NAMA_MESIN'] = df_qc['NAMA_MESIN'].astype(str).str.strip().str.title()
-    if 'NAMA_MESIN' in df_sic.columns: df_sic['NAMA_MESIN'] = df_sic['NAMA_MESIN'].astype(str).str.strip().str.title()
-    if 'PROSES' in df_oee.columns: df_oee['NAMA_MESIN'] = df_oee['PROSES'].astype(str).str.strip().str.title()
+    # Normalisasi Nama Mesin
+    if 'NAMA_MESIN' in df_qc.columns: df_qc['NAMA_MESIN'] = df_qc['NAMA_MESIN'].str.title()
+    if 'NAMA_MESIN' in df_sic.columns: df_sic['NAMA_MESIN'] = df_sic['NAMA_MESIN'].str.title()
+    if 'PROSES' in df_oee.columns: df_oee['NAMA_MESIN'] = df_oee['PROSES'].str.title()
 
-    with st.spinner("Menarik dan membersihkan data dari Google Sheets..."):
-        raw_qc, raw_sic, raw_oee, df_target = load_data()
-        df_qc, df_sic, df_oee, df_anomali_double, df_anomali_batch = clean_data(raw_qc, raw_sic, raw_oee)
-
-    # SIMPAN COPY FULL SEBELUM TERKENA FILTER TANGGAL GLOBAL (UNTUK TREN BULANAN QC)
-    df_qc_full = df_qc.copy()
-    df_sic_full = df_sic.copy()
-    df_oee_full = df_oee.copy()
-
-    # ==========================================
-    # 2. IDENTIFIKASI & CROSS-FILL NO BATCH KOSONG
-    # ==========================================
-    invalid_batches = ['-', ' ', '', 'nan', 'NaN', 'None', 'NaT']
-    
+    # ---------------------------------------------------------
+    # 3. CROSS-FILL NO BATCH KOSONG (VEKTORISASI)
+    # ---------------------------------------------------------
+    invalid_batches = ['', '-', 'nan', 'None', 'NAT']
     for df in [df_qc, df_sic, df_oee]:
         if 'NO_BATCH' in df.columns:
-            df['NO_BATCH'] = df['NO_BATCH'].astype(str).str.strip()
-            df.loc[df['NO_BATCH'].isin(invalid_batches), 'NO_BATCH'] = np.nan
+            df['NO_BATCH_CLEAN'] = df['NO_BATCH'].where(~df['NO_BATCH'].str.upper().isin(invalid_batches), np.nan)
 
     valid_batches = pd.concat([
-        df_qc[['TIMESTAMP', 'NAMA_MESIN', 'NO_BATCH']].dropna(),
-        df_sic[['TIMESTAMP', 'NAMA_MESIN', 'NO_BATCH']].dropna(),
-        df_oee[['TIMESTAMP', 'NAMA_MESIN', 'NO_BATCH']].dropna()
+        df_qc[['TIMESTAMP', 'NAMA_MESIN', 'NO_BATCH_CLEAN']].dropna(),
+        df_sic[['TIMESTAMP', 'NAMA_MESIN', 'NO_BATCH_CLEAN']].dropna(),
+        df_oee[['TIMESTAMP', 'NAMA_MESIN', 'NO_BATCH_CLEAN']].dropna()
     ])
     valid_batches['TANGGAL'] = valid_batches['TIMESTAMP'].dt.date
     
-    ref_batch = valid_batches.groupby(['TANGGAL', 'NAMA_MESIN'])['NO_BATCH'].agg(lambda x: x.mode()[0] if not x.mode().empty else np.nan).to_dict()
+    ref_batch = valid_batches.groupby(['TANGGAL', 'NAMA_MESIN'])['NO_BATCH_CLEAN'].agg(lambda x: x.mode()[0] if not x.mode().empty else np.nan).to_dict()
 
-    def fill_missing_batch(row):
-        if pd.isna(row.get('NO_BATCH')):
-            tanggal = row['TIMESTAMP'].date() if pd.notna(row['TIMESTAMP']) else None
-            mesin = row['NAMA_MESIN']
-            if (tanggal, mesin) in ref_batch:
-                return ref_batch[(tanggal, mesin)]
-        return row.get('NO_BATCH')
+    for df in [df_qc, df_sic, df_oee]:
+        df['TANGGAL_TEMP'] = df['TIMESTAMP'].dt.date
+        df['BATCH_FILLED'] = df.set_index(['TANGGAL_TEMP', 'NAMA_MESIN']).index.map(ref_batch)
+        df['NO_BATCH'] = df['NO_BATCH_CLEAN'].fillna(df['BATCH_FILLED']).fillna("")
+        df.drop(columns=['NO_BATCH_CLEAN', 'TANGGAL_TEMP', 'BATCH_FILLED'], errors='ignore', inplace=True)
 
-    df_qc['NO_BATCH'] = df_qc.apply(fill_missing_batch, axis=1)
-    df_sic['NO_BATCH'] = df_sic.apply(fill_missing_batch, axis=1)
-    df_oee['NO_BATCH'] = df_oee.apply(fill_missing_batch, axis=1)
-
-    # ==========================================
-    # 3. PEMISAHAN ANOMALI NO BATCH (Bukan Timbang)
-    # ==========================================
+    # ---------------------------------------------------------
+    # 4. PEMISAHAN ANOMALI NO BATCH
+    # ---------------------------------------------------------
     def pisahkan_anomali_batch(df, sumber):
-        kondisi_kosong = df['NO_BATCH'].isna()
+        kondisi_kosong = df['NO_BATCH'] == ""
         kondisi_timbang = df['NAMA_MESIN'].str.contains('Timbang', case=False, na=False)
         
         df_anomali = df[kondisi_kosong & ~kondisi_timbang].copy()
@@ -114,60 +95,40 @@ def clean_data(df_qc, df_sic, df_oee):
         df_anomali['KETERANGAN_ANOMALI'] = 'No Batch Kosong (Bukan Proses Timbang)'
         
         df_bersih = df[~kondisi_kosong | kondisi_timbang].copy()
-        df_bersih['NO_BATCH'] = df_bersih['NO_BATCH'].fillna("")
-        
         return df_bersih, df_anomali
 
     df_qc, df_qc_anomali = pisahkan_anomali_batch(df_qc, 'QC')
     df_sic, df_sic_anomali = pisahkan_anomali_batch(df_sic, 'SIC')
     df_oee, df_oee_anomali = pisahkan_anomali_batch(df_oee, 'OEE')
-
     df_anomali_batch = pd.concat([df_qc_anomali, df_sic_anomali, df_oee_anomali], ignore_index=True)
 
-    # ==========================================
-    # 4. PENYELERASAN NAMA MESIN & SUBBRAND (CROSSCHECK 3 SUMBER)
-    # ==========================================
+    # ---------------------------------------------------------
+    # 5. MASTER BATCH MAPPING & PENANGANAN DOUBLE INPUT SIC
+    # ---------------------------------------------------------
     valid_qc = df_qc[df_qc['NO_BATCH'] != ""]
     valid_sic = df_sic[df_sic['NO_BATCH'] != ""]
     valid_oee = df_oee[df_oee['NO_BATCH'] != ""]
 
-    def get_majority_name(batch_num, col_qc, col_sic, col_oee):
-        names = [str(x).strip().upper() for x in [col_qc, col_sic, col_oee] if pd.notna(x) and str(x).strip().upper() != 'NAN' and str(x).strip() != ""]
-        if not names: return "UNKNOWN"
-        return max(set(names), key=names.count)
-
-    master_batch_dict = {}
-    all_batches = set(valid_qc['NO_BATCH']).union(set(valid_sic['NO_BATCH'])).union(set(valid_oee['NO_BATCH']))
+    all_batches = list(set(valid_qc['NO_BATCH']).union(set(valid_sic['NO_BATCH'])).union(set(valid_oee['NO_BATCH'])))
     
-    qc_grouped = valid_qc.groupby('NO_BATCH').first()
-    sic_grouped = valid_sic.groupby('NO_BATCH').first()
-    oee_grouped = valid_oee.groupby('NO_BATCH').first()
+    # Fast Map Subbrand Master
+    sb_qc_map = valid_qc.groupby('NO_BATCH')['SUBBRAND'].first().to_dict()
+    sb_sic_map = valid_sic.groupby('NO_BATCH')['SUBBRAND'].first().to_dict()
+    sb_oee_map = valid_oee.groupby('NO_BATCH')['VARIAN_PRODUK'].first().to_dict()
 
-    for batch in all_batches:
-        sb_qc = qc_grouped.loc[batch, 'SUBBRAND'] if batch in qc_grouped.index else np.nan
-        sb_sic = sic_grouped.loc[batch, 'SUBBRAND'] if batch in sic_grouped.index else np.nan
-        sb_oee = oee_grouped.loc[batch, 'VARIAN_PRODUK'] if batch in oee_grouped.index else np.nan
-        
-        mesin_qc = qc_grouped.loc[batch, 'NAMA_MESIN'] if batch in qc_grouped.index else np.nan
-        mesin_sic = sic_grouped.loc[batch, 'NAMA_MESIN'] if batch in sic_grouped.index else np.nan
-        mesin_oee = oee_grouped.loc[batch, 'NAMA_MESIN'] if batch in oee_grouped.index else np.nan
-        
-        master_batch_dict[batch] = {
-            'SUBBRAND_MASTER': get_majority_name(batch, sb_qc, sb_sic, sb_oee),
-            'MESIN_MASTER': get_majority_name(batch, mesin_qc, mesin_sic, mesin_oee).title()
-        }
-        
-    master_df = pd.DataFrame.from_dict(master_batch_dict, orient='index')
+    master_sb = {}
+    for b in all_batches:
+        vals = [sb_qc_map.get(b, ''), sb_sic_map.get(b, ''), sb_oee_map.get(b, '')]
+        valid_vals = [v for v in vals if v and v.upper() not in ['NAN', 'NONE', '']]
+        master_sb[b] = valid_vals[0] if valid_vals else 'UNKNOWN'
 
-    df_qc = df_qc.merge(master_df, left_on='NO_BATCH', right_index=True, how='left')
-    df_sic = df_sic.merge(master_df, left_on='NO_BATCH', right_index=True, how='left')
-    df_oee = df_oee.merge(master_df, left_on='NO_BATCH', right_index=True, how='left')
+    df_qc['SUBBRAND_MASTER'] = df_qc['NO_BATCH'].map(master_sb).fillna('UNKNOWN')
+    df_sic['SUBBRAND_MASTER'] = df_sic['NO_BATCH'].map(master_sb).fillna('UNKNOWN')
+    df_oee['SUBBRAND_MASTER'] = df_oee['NO_BATCH'].map(master_sb).fillna('UNKNOWN')
 
-    # ==========================================
-    # 5. PENANGANAN DOUBLE INPUT (Khusus SIC)
-    # ==========================================
-    df_sic = df_sic.sort_values(by=['NO_BATCH', 'MESIN_MASTER', 'CYCLE', 'TIMESTAMP'])
-    df_sic['TIME_DIFF'] = df_sic.groupby(['NO_BATCH', 'MESIN_MASTER', 'CYCLE'])['TIMESTAMP'].diff()
+    # Handling Double Input SIC (>30 Min)
+    df_sic = df_sic.sort_values(by=['NO_BATCH', 'NAMA_MESIN', 'CYCLE', 'TIMESTAMP'])
+    df_sic['TIME_DIFF'] = df_sic.groupby(['NO_BATCH', 'NAMA_MESIN', 'CYCLE'])['TIMESTAMP'].diff()
     
     df_sic_anomali_double = df_sic[df_sic['TIME_DIFF'] > pd.Timedelta(minutes=30)].copy()
     if not df_sic_anomali_double.empty:
@@ -176,19 +137,18 @@ def clean_data(df_qc, df_sic, df_oee):
     kondisi_hapus = (df_sic['TIME_DIFF'] >= pd.Timedelta(seconds=0)) & (df_sic['TIME_DIFF'] <= pd.Timedelta(minutes=30))
     df_sic_bersih = df_sic[~kondisi_hapus].copy()
 
+    # Numeric Casting
     if 'OUTPUT_PCS' in df_sic_bersih.columns: df_sic_bersih['OUTPUT_PCS'] = pd.to_numeric(df_sic_bersih['OUTPUT_PCS'], errors='coerce').fillna(0)
     if 'REJECT_PCS' in df_qc.columns: df_qc['REJECT_PCS'] = pd.to_numeric(df_qc['REJECT_PCS'], errors='coerce').fillna(0)
+    if 'REPROSES_PCS' in df_qc.columns: df_qc['REPROSES_PCS'] = pd.to_numeric(df_qc['REPROSES_PCS'], errors='coerce').fillna(0)
     if 'KEMAS_RUSAK_PRODUKSI' in df_oee.columns: df_oee['KEMAS_RUSAK_PRODUKSI'] = pd.to_numeric(df_oee['KEMAS_RUSAK_PRODUKSI'], errors='coerce').fillna(0)
 
+    # Memastikan format string murni pada output DataFrame
+    for df in [df_qc, df_sic_bersih, df_oee, df_sic_anomali_double, df_anomali_batch]:
+        for col in df.select_dtypes(include=['object']).columns:
+            df[col] = df[col].astype(str)
+
     return df_qc, df_sic_bersih, df_oee, df_sic_anomali_double, df_anomali_batch
-
-# --- BLOK EKSEKUSI TAMPILAN (UI STREAMLIT) ---
-st.title("🏭 Dashboard Cerdas Produksi & Quality Control")
-
-try:
-    with st.spinner("Menarik dan membersihkan data dari Google Sheets..."):
-        raw_qc, raw_sic, raw_oee, df_target = load_data()
-        df_qc, df_sic, df_oee, df_anomali_double, df_anomali_batch = clean_data(raw_qc, raw_sic, raw_oee)
 
     # ==========================================
     # FILTER GLOBAL TANGGAL & BULAN BERJALAN
