@@ -706,7 +706,7 @@ try:
             else:
                 st.info("Data differensial belum cukup (butuh minimal 2 siklus aktif).")
 
-    # ==========================================
+   # ==========================================
     # TAB 2: KUALITAS (QC) & ALUR
     # ==========================================
     with tab2:
@@ -736,9 +736,11 @@ try:
         col_q1, col_q2 = st.columns(2)
 
         with col_q1:
-            st.markdown("**1. Volume Defect per Jenis Mesin (Reject vs Reproses)**")
+            st.markdown("**1. Volume Defect per Jenis Mesin (Khusus Filling & Press)**")
             if 'NAMA_MESIN_KEY' in df_oee_perf.columns:
-                df_defect_mesin = df_oee_perf.groupby('NAMA_MESIN_KEY').agg({
+                # Filter HANYA mesin Filling & Press (Samakan dengan Tab 1)
+                kondisi_fp_qc = df_oee_perf['NAMA_MESIN_KEY'].astype(str).str.contains('Filling|Press', case=False, na=False)
+                df_defect_mesin = df_oee_perf[kondisi_fp_qc].groupby('NAMA_MESIN_KEY').agg({
                     'REJECT_PCS': 'sum',
                     'REPROSES_PCS': 'sum'
                 }).reset_index()
@@ -759,7 +761,11 @@ try:
                     color_discrete_map={'Reject': '#EF553B', 'Reproses': '#FECB52'},
                     labels={'NAMA_MESIN_KEY': 'Nama Mesin', 'Pcs': 'Total Cacat (Pcs)'}
                 )
-                fig_defect_mesin.update_layout(height=400, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                fig_defect_mesin.update_layout(
+                    height=400,
+                    yaxis={'categoryorder': 'total ascending'},
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                )
                 st.plotly_chart(fig_defect_mesin, use_container_width=True)
             else:
                 st.info("Data defect per mesin belum tersedia.")
