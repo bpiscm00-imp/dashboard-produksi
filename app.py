@@ -710,24 +710,113 @@ try:
     # TAB 2: KUALITAS (QC) & ALUR
     # ==========================================
     with tab2:
-        st.subheader("Analisis Kegagalan & Penolakan Produk")
-        col_qc1, col_qc2 = st.columns(2)
+        st.subheader("🔍 Ringkasan Performance Kualitas & Analisis Defect (QC)")
+
+        # ---------------------------------------------------------
+        # 1. SUMMARY KPI METRICS QC
+        # ---------------------------------------------------------
+        tot_reject = pd.to_numeric(df_qc['REJECT_PCS'], errors='coerce').fillna(0).sum() if 'REJECT_PCS' in df_qc.columns else 0
+        tot_reproses = pd.to_numeric(df_qc['REPROSES_PCS'], errors='coerce').fillna(0).sum() if 'REPROSES_PCS' in df_qc.columns else 0
+        tot_capaian = pd.to_numeric(df_oee['CAPAIN_PRODUKSI_PCS'], errors='coerce').fillna(0).sum() if 'CAPAIN_PRODUKSI_PCS' in df_oee.columns else 0
         
-        with col_qc1:
-            if 'ALASAN_REJECT_REPRO' in df_qc.columns:
-                alasan_reject = df_qc.groupby('ALASAN_REJECT_REPRO')['REJECT_PCS'].sum().reset_index()
-                alasan_reject = alasan_reject[alasan_reject['ALASAN_REJECT_REPRO'] != '']
-                alasan_reject = alasan_reject.sort_values(by='REJECT_PCS', ascending=False).head(5)
+        total_gross_qc = tot_capaian + tot_reject + tot_reproses
+        overall_quality = (tot_capaian / total_gross_qc * 100) if total_gross_qc > 0 else 100.0
+
+        q_col1, q_col2, q_col3, q_col4 = st.columns(4)
+        q_col1.metric("Total Reject (QC)", f"{tot_reject:,.0f} Pcs")
+        q_col2.metric("Total Reproses (QC)", f"{tot_reproses:,.0f} Pcs")
+        q_col3.metric("Total Defect (QC)", f"{(tot_reject + tot_reproses):,.0f} Pcs")
+        q_col4.metric("Overall Quality Rate", f"{overall_quality:.2f} %")
+
+        st.markdown("---")
+
+        # ---------------------------------------------------------
+        # 2. GRAFIK VOLUME DEFECT PER MESIN & SUBBRAND
+        # ---------------------------------------------------------
+        col_q1, col_q2 = st.columns(2)
+
+        with col_q1:
+            st.markdown("**1. Volume Defect per Jenis Mesin (Reject vs Reproses)**")
+            if 'NAMA_MESIN_KEY' in df_oee_perf.columns:
+                df_defect_mesin = df_oee_perf.groupby('NAMA_MESIN_KEY').agg({
+                    'REJECT_PCS': 'sum',
+                    'REPROSES_PCS': 'sum'
+                }).reset_index()
                 
-                fig_reject = px.pie(alasan_reject, values='REJECT_PCS', names='ALASAN_REJECT_REPRO', hole=0.4,
-                                    title="Top 5 Alasan Reject Utama")
-                st.plotly_chart(fig_reject, use_container_width=True)
+                # Melt dataframe untuk membuat Stacked Bar Chart
+                df_defect_melted = df_defect_mesin.melt(
+                    id_vars=['NAMA_MESIN_KEY'], 
+                    value_vars=['REJECT_PCS', 'REPROSES_PCS'],
+                    var_name='Jenis Defect', value_name='Pcs'
+                )
+                df_defect_melted['Jenis Defect'] = df_defect_melted['Jenis Defect'].replace({
+                    'REJECT_PCS': 'Reject', 'REPROSES_PCS': 'Reproses'
+                })
+
+                fig_defect_mesin = px.bar(
+                    df_defect_melted, x='Pcs', y='NAMA_MESIN_KEY', color='Jenis Defect',
+                    orientation='h', barmode='stack',
+                    color_discrete_map={'Reject': '#EF553B', 'Reproses': '#FECB52'},
+                    labels={'NAMA_MESIN_KEY': 'Nama Mesin', 'Pcs': 'Total Cacat (Pcs)'}
+                )
+                fig_defect_mesin.update_layout(height=400, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_defect_mesin, use_container_width=True)
+            else:
+                st.info("Data defect per mesin belum tersedia.")
+
+        with col_q2:
+            st.markdown("**2. Top 10 Subbrand dengan Total Reject Terbanyak (Pcs)**")
+            if 'SUBBRAND_DISPLAY' in df_oee_perf_fp.columns:
+                q_sb_reject = df_oee_perf_fp.groupby('SUBBRAND_DISPLAY')['REJECT_PCS'].sum().reset_index()
+                q_sb_reject = q_sb_reject[q_sb_reject['REJECT_PCS'] > 0].sort_values(by='REJECT_PCS', ascending=False).head(10)
+
+                if not q_sb_reject.empty:
+                    fig_q_sb = px.bar(
+                        q_sb_reject, x='REJECT_PCS', y='SUBBRAND_DISPLAY', orientation='h',
+                        text='REJECT_PCS', color='REJECT_PCS',
+                        color_continuous_scale='Reds', labels={'SUBBRAND_DISPLAY': 'Subbrand', 'REJECT_PCS': 'Reject (Pcs)'}
+                    )
+                    fig_q_sb.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
+                    fig_q_sb.update_layout(yaxis={'categoryorder': 'total ascending'}, height=400, showlegend=False)
+                    st.plotly_chart(fig_q_sb, use_container_width=True)
+                else:
+                    st.info("Tidak ada data reject pada subbrand.")
+            else:
+                st.info("Data subbrand belum tersedia.")
+
+        st.markdown("---")
+
+        # ---------------------------------------------------------
+        # 3. PARETO ALASAN REJECT & DEEP DIVE BATCH
+        # ---------------------------------------------------------
+        col_qc1, col_qc2 = st.columns(2)
+
+        with col_qc1:
+            st.markdown("**3. Pareto Alasan Reject & Reproses Utama**")
+            if 'ALASAN_REJECT_REPRO' in df_qc.columns:
+                alasan_df = df_qc.copy()
+                alasan_df['TOTAL_DEFECT'] = pd.to_numeric(alasan_df['REJECT_PCS'], errors='coerce').fillna(0) + pd.to_numeric(alasan_df['REPROSES_PCS'], errors='coerce').fillna(0)
+                
+                alasan_summary = alasan_df.groupby('ALASAN_REJECT_REPRO')['TOTAL_DEFECT'].sum().reset_index()
+                alasan_summary = alasan_summary[~alasan_summary['ALASAN_REJECT_REPRO'].astype(str).str.strip().str.upper().isin(['', 'NAN', 'NONE', '-'])]
+                alasan_summary = alasan_summary.sort_values(by='TOTAL_DEFECT', ascending=False).head(7)
+
+                if not alasan_summary.empty:
+                    fig_alasan = px.bar(
+                        alasan_summary, x='TOTAL_DEFECT', y='ALASAN_REJECT_REPRO', orientation='h',
+                        text='TOTAL_DEFECT', color='TOTAL_DEFECT', color_continuous_scale='Oranges',
+                        labels={'TOTAL_DEFECT': 'Jumlah Defect (Pcs)', 'ALASAN_REJECT_REPRO': 'Alasan Defect'}
+                    )
+                    fig_alasan.update_layout(yaxis={'categoryorder': 'total ascending'}, height=400, showlegend=False)
+                    st.plotly_chart(fig_alasan, use_container_width=True)
+                else:
+                    st.info("Tidak ada data alasan reject/reproses.")
 
         with col_qc2:
-            st.markdown("**Deep Dive Pencarian Alur Batch**")
-            list_batch = df_sic['NO_BATCH'].dropna().unique().tolist()
+            st.markdown("**4. Deep Dive Pencarian Alur Batch**")
+            list_batch = sorted([b for b in df_sic['NO_BATCH'].dropna().unique().tolist() if str(b).strip() != ""])
             cari_batch = st.selectbox("Ketik atau Pilih Nomor Batch:", [""] + list_batch)
-            
+
             if cari_batch != "":
                 alur_batch = df_sic[df_sic['NO_BATCH'] == cari_batch]
                 if not alur_batch.empty:
