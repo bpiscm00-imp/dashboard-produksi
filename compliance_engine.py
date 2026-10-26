@@ -7,6 +7,24 @@ import requests
 # 1. HELPER NORMALISASI & TANGGAL FISKAL
 # ============================================================
 
+def extract_full_machine_name(row):
+    """
+    Memastikan nama mesin selalu membawa nomor line/mesin 
+    meskipun kolom NAMA_MESIN dan NO_MESIN_LINE terpisah di Raw Data.
+    """
+    mesin_full = str(row.get('MESIN_FULL', '')).strip()
+    if mesin_full and mesin_full.lower() not in ['nan', 'none', '', '<na>']:
+        return mesin_full
+    
+    nama_mesin = str(row.get('NAMA_MESIN', row.get('PROSES', ''))).strip()
+    no_line = str(row.get('NO_MESIN_LINE', row.get('NO_MESIN', ''))).strip().replace('.0', '')
+    
+    # Jika nomor line ada dan belum tergabung di nama_mesin, gabungkan
+    if no_line and no_line.lower() not in ['nan', 'none', '', '0'] and no_line not in nama_mesin:
+        return f"{nama_mesin} - {no_line}"
+    
+    return nama_mesin
+
 def normalisasi_mesin(nama_mentah):
     if not nama_mentah or pd.isna(nama_mentah):
         return "Mesin Tidak Diketahui"
@@ -14,8 +32,8 @@ def normalisasi_mesin(nama_mentah):
     text = re.sub(r'\s+', ' ', str(nama_mentah)).strip().upper()
     text = re.sub(r'^([A-Z\s]+?)\s*[-_]?\s*(\d+)$', r'\1 - \2', text)
     
+    # Mengonversi digit nomor mesin ke int() agar leading zero (02 -> 2) otomatis hilang
     match_num = re.search(r'\d+', text)
-    # Ubah ke int() terlebih dahulu agar "02" menjadi 2
     nomor = str(int(match_num.group(0))) if match_num else ""
     
     if "MIXING" in text and "SERBUK" not in text:
@@ -103,24 +121,28 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
         oee_batches_per_date[tgl_acuan][batch] = True
         
         if start_date_str <= tgl_acuan <= end_date_str:
-            mesin = normalisasi_mesin(row.get('MESIN_FULL', row.get('NAMA_MESIN')))
+            raw_mesin_str = extract_full_machine_name(row)
+            mesin = normalisasi_mesin(raw_mesin_str)
             output_fg = pd.to_numeric(row.get('CAPAIN_PRODUKSI_PCS', 0), errors='coerce') or 0
             op = normalisasi_operator(row.get('OPERATOR', row.get('NAMA_OPERATOR')))
             jam_mulai = pd.to_datetime(row.get('JAM_MULAI'), errors='coerce')
             
+            # Key tanpa memasukkan operator agar OEE & SIC selalu dapat dicocokkan secara independen
             key = f"{tgl_acuan}_{batch}_{mesin}"
             
             if key not in master_log:
-                    master_log[key] = {
+                master_log[key] = {
                     'tanggal': tgl_acuan, 'batch': batch, 'mesin': mesin, 'operator': op,
                     'oee': False, 'sic': False, 'oeeOutput': 0, 'sicOutput': 0,
                     'picOee': op, 'picSic': "-", 'picQc': "-", 'oeeTepatWaktu': True,
                     'sicRows': 0, 'sicLastStatus': "", 'jamMulaiOEE': None, 'tsSICPertama': None
                 }
+                
             master_log[key]['oee'] = True
             master_log[key]['oeeOutput'] += output_fg
             master_log[key]['picOee'] = op
             if op != "-": master_log[key]['operator'] = op
+            master_log[key]['jamMulaiOEE'] = jam_mulai
             
             selesai = pd.to_datetime(row.get('JAM_SELESAI'), errors='coerce')
             if pd.notna(selesai) and pd.notna(ts_oee) and ts_oee < (selesai - timedelta(minutes=30)):
@@ -139,11 +161,13 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
         fiscal_date_sic = get_fiscal_date(ts, oee_batches_per_date, oee_batches_per_date, batch)
         
         if fiscal_date_sic and start_date_str <= fiscal_date_sic <= end_date_str:
-            mesin = normalisasi_mesin(row.get('NAMA_MESIN'))
+            raw_mesin_str = extract_full_machine_name(row)
+            mesin = normalisasi_mesin(raw_mesin_str)
             output_jam = pd.to_numeric(row.get('OUTPUT_PCS', 0), errors='coerce') or 0
             op = normalisasi_operator(row.get('OPERATOR', row.get('NAMA_OPERATOR')))
             status = str(row.get('STATUS_ALUR', '')).strip()
             
+            # Key tanpa memasukkan operator agar OEE & SIC selalu dapat dicocokkan secara independen
             key = f"{fiscal_date_sic}_{batch}_{mesin}"
             
             if key not in master_log:
@@ -153,10 +177,16 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
                     'picOee': "-", 'picSic': op, 'picQc': "-", 'oeeTepatWaktu': True,
                     'sicRows': 0, 'sicLastStatus': "", 'jamMulaiOEE': None, 'tsSICPertama': None
                 }
+                
             master_log[key]['sic'] = True
             master_log[key]['sicOutput'] += output_jam
             master_log[key]['picSic'] = op
             if master_log[key]['operator'] == "-": master_log[key]['operator'] = op
+            master_log[key]['sicRows'] += 1
+            master_log[key]['sicLastStatus'] = status
+            
+            if master_log[key]['tsSICPertama'] is None or ts < master_log[key]['tsSICPertama']:
+                master_log[key]['tsSICPertama'] = ts
 
     # C. PROSES DATA QC
     for _, row in df_qc.iterrows():
@@ -171,7 +201,8 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
         fiscal_date_qc = get_fiscal_date(ts_qc, oee_batches_per_date, oee_batches_per_date, batch)
         
         if fiscal_date_qc and start_date_str <= fiscal_date_qc <= end_date_str:
-            mesin = normalisasi_mesin(row.get('NAMA_MESIN'))
+            raw_mesin_str = extract_full_machine_name(row)
+            mesin = normalisasi_mesin(raw_mesin_str)
             reproses = pd.to_numeric(row.get('REPROSES_PCS', 0), errors='coerce') or 0
             reject = pd.to_numeric(row.get('REJECT_PCS', 0), errors='coerce') or 0
             op_qc = normalisasi_operator(row.get('INSPEKTOR', row.get('OPERATOR', row.get('NAMA_OPERATOR'))))
@@ -268,7 +299,7 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
                 if present[0]['pic'] == present[1]['pic'] and present[1]['pic'] == present[2]['pic']:
                     teks_present = f"(OEE/SIC/QC oleh: {present[0]['pic']})"
                 else:
-                    teks_str = " dan ".join([f"{p} oleh: {p['pic']}" for p in present])
+                    teks_str = " dan ".join([f"{p['name']} oleh: {p['pic']}" for p in present])
                     teks_present = f"({teks_str})"
                     
             teks_pic_log = f"{teks_missing} {teks_present}".strip()
@@ -339,7 +370,7 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             if qc_item['lastStatus'] in ["Selesai Proses", "AKHIR"]:
                 qc_user_stats[user_qc]['patuh'] += 1
 
-    # PERBAIKAN METRIK HAPUS '100% (0/0)' JIKA TIDAK ADA DATA
+    # Format Tampilan Metrik (Tampilkan N/A jika Tidak Ada Batch)
     if dept_total_oee_sic > 0:
         skor_dept_oee_sic_str = f"{round((dept_patuh_oee_sic / dept_total_oee_sic) * 100)}% ({round(dept_patuh_oee_sic)}/{dept_total_oee_sic})"
     else:
