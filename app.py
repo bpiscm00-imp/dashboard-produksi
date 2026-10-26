@@ -4,11 +4,11 @@ import numpy as np
 import gspread
 import plotly.express as px
 from datetime import datetime, timedelta
+import calendar
 from oauth2client.service_account import ServiceAccountCredentials
 
-# IMPOR MODUL AUDIT KEPATUHAN
 from compliance_engine import (
-    get_rapport_cards,
+    get_rapport_cards_range,
     send_fonnte_wa,
     build_wa_msg_operator,
     build_wa_msg_qc
@@ -48,14 +48,12 @@ def load_data():
 # ==========================================
 @st.cache_data(ttl=600)
 def clean_data(df_qc, df_sic, df_oee):
-    # Standardisasi Tipe Data Utama (Pencegahan PyArrow Error)
     for df in [df_qc, df_sic, df_oee]:
         for col in ['NO_BATCH', 'NAMA_MESIN', 'SUBBRAND', 'VARIAN_PRODUK', 'NO_MESIN_LINE', 'MESIN_FULL', 'PROSES']:
             if col in df.columns:
                 df[col] = df[col].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
                 df[col] = df[col].replace({'nan': '', 'None': '', 'NaN': '', '<NA>': ''})
 
-    # Standardisasi Format Timestamp
     def fix_timestamp(ts_series):
         ts_clean = ts_series.astype(str).str.replace(',', '', regex=False).str.replace('.', ':', regex=False)
         return pd.to_datetime(ts_clean, dayfirst=True, format='mixed', errors='coerce')
@@ -70,7 +68,6 @@ def clean_data(df_qc, df_sic, df_oee):
     if 'NAMA_MESIN' in df_sic.columns: df_sic['NAMA_MESIN'] = df_sic['NAMA_MESIN'].str.title()
     if 'PROSES' in df_oee.columns: df_oee['NAMA_MESIN'] = df_oee['PROSES'].str.title()
 
-    # Cross-Fill No Batch Kosong Berdasarkan Tanggal & Mesin
     invalid_batches = ['', '-', 'nan', 'None', 'NAT']
     for df in [df_qc, df_sic, df_oee]:
         if 'NO_BATCH' in df.columns:
@@ -91,7 +88,6 @@ def clean_data(df_qc, df_sic, df_oee):
         df['NO_BATCH'] = df['NO_BATCH_CLEAN'].fillna(df['BATCH_FILLED']).fillna("")
         df.drop(columns=['NO_BATCH_CLEAN', 'TANGGAL_TEMP', 'BATCH_FILLED'], errors='ignore', inplace=True)
 
-    # Pemisahan Anomali No Batch Kosong (Selain Timbang)
     def pisahkan_anomali_batch(df, sumber):
         kondisi_kosong = df['NO_BATCH'] == ""
         kondisi_timbang = df['NAMA_MESIN'].str.contains('Timbang', case=False, na=False)
@@ -108,7 +104,6 @@ def clean_data(df_qc, df_sic, df_oee):
     df_oee, df_oee_anomali = pisahkan_anomali_batch(df_oee, 'OEE')
     df_anomali_batch = pd.concat([df_qc_anomali, df_sic_anomali, df_oee_anomali], ignore_index=True)
 
-    # Master Subbrand Mapping
     valid_qc = df_qc[df_qc['NO_BATCH'] != ""]
     valid_sic = df_sic[df_sic['NO_BATCH'] != ""]
     valid_oee = df_oee[df_oee['NO_BATCH'] != ""]
@@ -129,7 +124,6 @@ def clean_data(df_qc, df_sic, df_oee):
     df_sic['SUBBRAND_MASTER'] = df_sic['NO_BATCH'].map(master_sb).fillna('UNKNOWN')
     df_oee['SUBBRAND_MASTER'] = df_oee['NO_BATCH'].map(master_sb).fillna('UNKNOWN')
 
-    # Handling Double Input SIC (>30 Menit)
     df_sic = df_sic.sort_values(by=['NO_BATCH', 'NAMA_MESIN', 'CYCLE', 'TIMESTAMP'])
     df_sic['TIME_DIFF'] = df_sic.groupby(['NO_BATCH', 'NAMA_MESIN', 'CYCLE'])['TIMESTAMP'].diff()
     
@@ -140,7 +134,6 @@ def clean_data(df_qc, df_sic, df_oee):
     kondisi_hapus = (df_sic['TIME_DIFF'] >= pd.Timedelta(seconds=0)) & (df_sic['TIME_DIFF'] <= pd.Timedelta(minutes=30))
     df_sic_bersih = df_sic[~kondisi_hapus].copy()
 
-    # Numeric Casting
     if 'OUTPUT_PCS' in df_sic_bersih.columns: df_sic_bersih['OUTPUT_PCS'] = pd.to_numeric(df_sic_bersih['OUTPUT_PCS'], errors='coerce').fillna(0)
     if 'REJECT_PCS' in df_qc.columns: df_qc['REJECT_PCS'] = pd.to_numeric(df_qc['REJECT_PCS'], errors='coerce').fillna(0)
     if 'REPROSES_PCS' in df_qc.columns: df_qc['REPROSES_PCS'] = pd.to_numeric(df_qc['REPROSES_PCS'], errors='coerce').fillna(0)
@@ -661,26 +654,93 @@ try:
         fonnte_token = st.secrets.get("FONNTE_TOKEN", "T3rQq4tCo8hEAC9ovYpa")
         wa_target_no = st.secrets.get("WA_TARGET", "6281283430510")
         
-        max_date_data = df_oee['TIMESTAMP'].dt.date.max() if not df_oee.empty else datetime.now().date()
-        target_audit_date = st.date_input("Pilih Tanggal Audit Kepatuhan (H-1 Produksi):", value=max_date_data - timedelta(days=1))
-        target_audit_str = target_audit_date.strftime("%Y-%m-%d")
+        # 1. FILTER RENTANG WAKTU (HARIAN VS BULANAN)
+        col_m1, col_m2 = st.columns([2, 3])
+        with col_m1:
+            mode_audit = st.radio("Pilih Opsi Tampilan Audit:", ["Harian (Specific Date)", "Bulanan (Full Month)"], horizontal=True)
         
+        max_dt = df_oee_full['TIMESTAMP'].max() if not df_oee_full.empty else datetime.now()
+        
+        if mode_audit == "Harian (Specific Date)":
+            with col_m2:
+                audit_date = st.date_input("Pilih Tanggal Audit Kepatuhan:", value=(max_dt - timedelta(days=1)).date())
+                start_audit_str = audit_date.strftime("%Y-%m-%d")
+                end_audit_str = audit_date.strftime("%Y-%m-%d")
+                periode_judul = f"Tanggal {audit_date.strftime('%d %B %Y')}"
+        else:
+            with col_m2:
+                col_bln, col_thn = st.columns(2)
+                with col_bln:
+                    pilih_bulan = st.selectbox("Pilih Bulan:", list(range(1, 13)), index=max_dt.month - 1, format_func=lambda x: datetime(2000, x, 1).strftime('%B'))
+                with col_thn:
+                    pilih_tahun = st.number_input("Pilih Tahun:", min_value=2024, max_value=2030, value=max_dt.year)
+                
+                last_day = calendar.monthrange(pilih_tahun, pilih_bulan)[1]
+                start_audit_str = f"{pilih_tahun:04d}-{pilih_bulan:02d}-01"
+                end_audit_str = f"{pilih_tahun:04d}-{pilih_bulan:02d}-{last_day:02d}"
+                periode_judul = f"Bulan {datetime(pilih_tahun, pilih_bulan, 1).strftime('%B %Y')}"
+
         with st.spinner("Menganalisis Kepatuhan 3-Form (OEE, SIC, QC)..."):
-            compliance_res = get_rapport_cards(df_oee, df_sic, df_qc, target_audit_str)
-            
+            compliance_res = get_rapport_cards_range(df_oee_full, df_sic_full, df_qc_full, start_audit_str, end_audit_str)
+
+        # 2. METRIKS UTAMA COMPLIANCE (METRIK TIDAK LAGI SHOW 100% JIKA DATA 0)
         c1, c2, c3 = st.columns(3)
         c1.metric("Kepatuhan Dept OEE - SIC", compliance_res['skorDeptOEESIC'])
         c2.metric("Kepatuhan Dept QC", compliance_res['skorDeptQC'])
         c3.metric("Akurasi Output (OEE vs SIC)", compliance_res['skorAkurasi'])
-        
+
         st.markdown("---")
+
+        # 3. VISUALISASI GRAFIK COMPLIANCE RATE USER (DIPISAH: PRODUKSI VS QC)
+        st.markdown(f"### 📊 Perbandingan Compliance Rate User ({periode_judul})")
         
-        st.markdown(f"### 👤 Rapport Card Operator Produksi ({target_audit_date.strftime('%d %b %Y')})")
+        col_g1, col_g2 = st.columns(2)
+        
+        with col_g1:
+            st.markdown("**1. Tim Operator Produksi (OEE & SIC)**")
+            df_prod_comp = compliance_res['dfProdCompliance']
+            if not df_prod_comp.empty and df_prod_comp['Total Batch'].sum() > 0:
+                df_prod_comp = df_prod_comp.sort_values(by='Compliance Rate (%)', ascending=True)
+                fig_prod_comp = px.bar(
+                    df_prod_comp, x='Compliance Rate (%)', y='Operator', orientation='h',
+                    text='Compliance Rate (%)', color='Compliance Rate (%)',
+                    color_continuous_scale='Teal',
+                    labels={'Compliance Rate (%)': 'Compliance Rate (%)', 'Operator': 'Nama Operator'},
+                    hover_data=['Total Batch']
+                )
+                fig_prod_comp.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+                fig_prod_comp.update_layout(height=380, xaxis_range=[0, 115], showlegend=False)
+                st.plotly_chart(fig_prod_comp, width='stretch')
+            else:
+                st.info(f"Tidak ada data aktivitas operator produksi pada {periode_judul}.")
+
+        with col_g2:
+            st.markdown("**2. Tim Inspector QC**")
+            df_qc_comp = compliance_res['dfQCCompliance']
+            if not df_qc_comp.empty and df_qc_comp['Total Batch'].sum() > 0:
+                df_qc_comp = df_qc_comp.sort_values(by='Compliance Rate (%)', ascending=True)
+                fig_qc_comp = px.bar(
+                    df_qc_comp, x='Compliance Rate (%)', y='Inspector QC', orientation='h',
+                    text='Compliance Rate (%)', color='Compliance Rate (%)',
+                    color_continuous_scale='Blues',
+                    labels={'Compliance Rate (%)': 'Compliance Rate (%)', 'Inspector QC': 'Nama Inspector'},
+                    hover_data=['Total Batch']
+                )
+                fig_qc_comp.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+                fig_qc_comp.update_layout(height=380, xaxis_range=[0, 115], showlegend=False)
+                st.plotly_chart(fig_qc_comp, width='stretch')
+            else:
+                st.info(f"Tidak ada data aktivitas inspector QC pada {periode_judul}.")
+
+        st.markdown("---")
+
+        # 4. DETAIL BREAKDOWN & WHATSAPP BLAST
+        st.markdown(f"### 👤 Detail Rapport Card Individual ({periode_judul})")
         
         op_cards = compliance_res['operatorCards']
         if op_cards:
             op_names = [card['operator'] for card in op_cards]
-            selected_op = st.selectbox("🔍 Pilih Nama Operator:", op_names)
+            selected_op = st.selectbox("🔍 Pilih Nama User untuk Detail Catatan:", op_names)
             
             card_user = next((c for c in op_cards if c['operator'] == selected_op), None)
             
@@ -691,41 +751,43 @@ try:
                 if card_user['kelalaianInput']:
                     st.markdown("**❌ Kelalaian Input Form / Late Log (>30 Menit):**")
                     for k in card_user['kelalaianInput']:
-                        st.error(f"• **{k['mesin']}** (Batch: `{k['batch']}`)\n  ↳ _{k['keterangan']}_")
+                        tgl_k = f" ({k['tanggal']})" if k.get('tanggal') else ""
+                        st.error(f"• **{k['mesin']}**{tgl_k} (Batch: `{k['batch']}`)\n  ↳ _{k['keterangan']}_")
                         
                 if card_user['selisihOutput']:
                     st.markdown("**⚠️ Selisih Output Data (OEE vs SIC):**")
                     for s in card_user['selisihOutput']:
+                        tgl_s = f" ({s['tanggal']})" if s.get('tanggal') else ""
                         sign = "+" if s['selisih'] > 0 else ""
-                        st.warning(f"• **{s['mesin']}** (Batch: `{s['batch']}`)\n  ↳ Akurasi: **{s['akurasi']}** (OEE: {s['oeeOut']:,.0f} vs SIC: {s['sicOut']:,.0f} | Diff: {sign}{s['selisih']:,.0f} Pcs)")
+                        st.warning(f"• **{s['mesin']}**{tgl_s} (Batch: `{s['batch']}`)\n  ↳ Akurasi: **{s['akurasi']}** (OEE: {s['oeeOut']:,.0f} vs SIC: {s['sicOut']:,.0f} | Diff: {sign}{s['selisih']:,.0f} Pcs)")
                 
                 if st.button(f"📲 Kirim Rapport Card {selected_op} via WhatsApp (Fonnte)"):
-                    msg_wa = build_wa_msg_operator(card_user, target_audit_date.strftime("%d %b %Y"))
+                    msg_wa = build_wa_msg_operator(card_user, periode_judul)
                     res_wa = send_fonnte_wa(fonnte_token, wa_target_no, msg_wa)
                     if res_wa.get("status") or res_wa.get("detail"):
                         st.success(f"Pesan WhatsApp Rapport Card {selected_op} Berhasil Dikirim!")
                     else:
                         st.error(f"Gagal mengirim WA: {res_wa.get('reason', 'Unknown Error')}")
         else:
-            st.success("🎉 Seluruh operator 100% COMPLIANT pada tanggal ini! Tidak ditemukan kelalaian input, late log, maupun selisih output.")
+            st.success(f"🎉 Seluruh operator 100% COMPLIANT pada {periode_judul}! Tidak ditemukan kelalaian input, late log, maupun selisih output.")
 
         st.markdown("---")
         
-        st.markdown("### 🚨 Missed Checklist QC (Batch Belum Diisi Form QC)")
+        st.markdown(f"### 🚨 Missed Checklist QC (Batch Belum Diisi Form QC)")
         qc_pending = compliance_res['qcPendingList']
         
         if qc_pending:
             st.dataframe(pd.DataFrame(qc_pending), width='stretch')
             
             if st.button("📲 Send Alert Missed QC List via WhatsApp (Fonnte)"):
-                msg_qc = build_wa_msg_qc(qc_pending, target_audit_date.strftime("%d %b %Y"))
+                msg_qc = build_wa_msg_qc(qc_pending, periode_judul)
                 res_qc = send_fonnte_wa(fonnte_token, wa_target_no, msg_qc)
                 if res_qc.get("status") or res_qc.get("detail"):
                     st.success("Pesan Alert Missed QC Checklist Berhasil Dikirim!")
                 else:
                     st.error(f"Gagal mengirim WA: {res_qc.get('reason', 'Unknown Error')}")
         else:
-            st.success("✅ Seluruh form QC telah terisi lengkap untuk tanggal ini.")
+            st.success(f"✅ Seluruh form QC telah terisi lengkap untuk {periode_judul}.")
 
 except Exception as e:
     st.error(f"Terjadi kesalahan pada aplikasi: {e}")
