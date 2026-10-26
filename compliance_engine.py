@@ -68,10 +68,10 @@ def get_fiscal_date(dt_ts, oee_batches_today, oee_batches_yesterday, batch_no):
         return yesterday_str if jam < 6 else ts_date_str
 
 # ============================================================
-# 2. ENGINE AUDIT KEPATUHAN & INTEGRASI 3-FORM
+# 2. ENGINE AUDIT KEPATUHAN & AGREGASI COMPLIANCE
 # ============================================================
 
-def audit_compliance_data(df_oee, df_sic, df_qc, target_date_str):
+def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
     master_log = {}
     oee_batches_per_date = {}
     global_qc_map = {}
@@ -104,17 +104,17 @@ def audit_compliance_data(df_oee, df_sic, df_qc, target_date_str):
             oee_batches_per_date[tgl_acuan] = {}
         oee_batches_per_date[tgl_acuan][batch] = True
         
-        if tgl_acuan == target_date_str:
+        if start_date_str <= tgl_acuan <= end_date_str:
             mesin = normalisasi_mesin(row.get('MESIN_FULL', row.get('NAMA_MESIN')))
             output_fg = pd.to_numeric(row.get('CAPAIN_PRODUKSI_PCS', 0), errors='coerce') or 0
             op = normalisasi_operator(row.get('OPERATOR', row.get('NAMA_OPERATOR')))
             jam_mulai = pd.to_datetime(row.get('JAM_MULAI'), errors='coerce')
             
-            key = f"{batch}_{mesin}_{op}"
+            key = f"{tgl_acuan}_{batch}_{mesin}_{op}"
             
             if key not in master_log:
                 master_log[key] = {
-                    'batch': batch, 'mesin': mesin, 'operator': op,
+                    'tanggal': tgl_acuan, 'batch': batch, 'mesin': mesin, 'operator': op,
                     'oee': False, 'sic': False, 'oeeOutput': 0, 'sicOutput': 0,
                     'picOee': op, 'picSic': "-", 'picQc': "-", 'oeeTepatWaktu': True,
                     'sicRows': 0, 'sicLastStatus': "", 'jamMulaiOEE': None, 'tsSICPertama': None
@@ -141,17 +141,17 @@ def audit_compliance_data(df_oee, df_sic, df_qc, target_date_str):
             
         fiscal_date_sic = get_fiscal_date(ts, oee_batches_per_date, oee_batches_per_date, batch)
         
-        if fiscal_date_sic == target_date_str:
+        if fiscal_date_sic and start_date_str <= fiscal_date_sic <= end_date_str:
             mesin = normalisasi_mesin(row.get('NAMA_MESIN'))
             output_jam = pd.to_numeric(row.get('OUTPUT_PCS', 0), errors='coerce') or 0
             op = normalisasi_operator(row.get('OPERATOR', row.get('NAMA_OPERATOR')))
             status = str(row.get('STATUS_ALUR', '')).strip()
             
-            key = f"{batch}_{mesin}_{op}"
+            key = f"{fiscal_date_sic}_{batch}_{mesin}_{op}"
             
             if key not in master_log:
                 master_log[key] = {
-                    'batch': batch, 'mesin': mesin, 'operator': op,
+                    'tanggal': fiscal_date_sic, 'batch': batch, 'mesin': mesin, 'operator': op,
                     'oee': False, 'sic': False, 'oeeOutput': 0, 'sicOutput': 0,
                     'picOee': "-", 'picSic': op, 'picQc': "-", 'oeeTepatWaktu': True,
                     'sicRows': 0, 'sicLastStatus': "", 'jamMulaiOEE': None, 'tsSICPertama': None
@@ -178,7 +178,7 @@ def audit_compliance_data(df_oee, df_sic, df_qc, target_date_str):
             
         fiscal_date_qc = get_fiscal_date(ts_qc, oee_batches_per_date, oee_batches_per_date, batch)
         
-        if fiscal_date_qc == target_date_str:
+        if fiscal_date_qc and start_date_str <= fiscal_date_qc <= end_date_str:
             mesin = normalisasi_mesin(row.get('NAMA_MESIN'))
             reproses = pd.to_numeric(row.get('REPROSES_PCS', 0), errors='coerce') or 0
             reject = pd.to_numeric(row.get('REJECT_PCS', 0), errors='coerce') or 0
@@ -189,7 +189,7 @@ def audit_compliance_data(df_oee, df_sic, df_qc, target_date_str):
             if status in ["Selesai Proses", "AKHIR"]:
                 patuh_qc_indiv += 1
                 
-            qc_lookup_key = f"{batch}_{mesin}"
+            qc_lookup_key = f"{fiscal_date_qc}_{batch}_{mesin}"
             if qc_lookup_key not in global_qc_map:
                 global_qc_map[qc_lookup_key] = {'terisi': True, 'rows': 0, 'lastStatus': status, 'user': op_qc}
             global_qc_map[qc_lookup_key]['rows'] += 1
@@ -201,14 +201,15 @@ def audit_compliance_data(df_oee, df_sic, df_qc, target_date_str):
 
     # D. DUAL EVALUATION ENGINE & AUDIT MISMATCH
     mismatch_list = []
-    indiv_total_oee, indiv_patuh_oee = 0, 0
-    indiv_total_sic, indiv_patuh_sic = 0, 0
+    prod_user_stats = {}
+    qc_user_stats = {}
+    
     dept_total_oee_sic, dept_patuh_oee_sic = 0, 0
     dept_total_qc, dept_patuh_qc = 0, 0
     total_batch_akurasi_diuji, total_persentase_akurasi = 0, 0
-    
+
     for key, item in master_log.items():
-        qc_key = f"{item['batch']}_{item['mesin']}"
+        qc_key = f"{item['tanggal']}_{item['batch']}_{item['mesin']}"
         has_qc_data = qc_key in global_qc_map
         if has_qc_data:
             item['picQc'] = global_qc_map[qc_key]['user']
@@ -217,16 +218,18 @@ def audit_compliance_data(df_oee, df_sic, df_qc, target_date_str):
         is_proses_timbang = any(x in mesin_upper for x in ["TIMBANG", "PENIMBANGAN", "TB"])
         is_eksklusi_akurasi = any(x in mesin_upper for x in ["MO", "MS", "TR", "HAMMER"]) or is_proses_timbang
         
-        if item['oee']:
-            indiv_total_oee += 1
-            if item['oeeTepatWaktu']: indiv_patuh_oee += 1
+        # Agregasi Tim Produksi
+        op_prod = item['operator']
+        if op_prod and op_prod != "-":
+            if op_prod not in prod_user_stats:
+                prod_user_stats[op_prod] = {'total': 0, 'patuh': 0}
+            prod_user_stats[op_prod]['total'] += 1
             
-        if item['sic']:
-            indiv_total_sic += 1
-            sic_ok = item['sicLastStatus'] in ["Selesai Proses", "SELESAI", "Istirahat"]
-            if sic_ok: indiv_patuh_sic += 1
-            elif item['sicRows'] > 1: indiv_patuh_sic += 0.7
-            
+            oee_ok = item['oee'] and item['oeeTepatWaktu']
+            sic_ok = item['sic'] and (item['sicLastStatus'] in ["Selesai Proses", "SELESAI", "Istirahat"])
+            if oee_ok and sic_ok:
+                prod_user_stats[op_prod]['patuh'] += 1
+
         if item['oee'] or item['sic']:
             dept_total_oee_sic += 1
             if item['oee'] and item['sic']:
@@ -242,7 +245,7 @@ def audit_compliance_data(df_oee, df_sic, df_qc, target_date_str):
                     qc_rows = global_qc_map[qc_key]['rows']
                     if qc_status in ["Selesai Proses", "AKHIR"]: dept_patuh_qc += 1
                     elif qc_rows > 1: dept_patuh_qc += 0.7
-                    
+
         # Audit Kelalaian Input
         missing = []
         if not item['oee']: missing.append("OEE")
@@ -273,13 +276,14 @@ def audit_compliance_data(df_oee, df_sic, df_qc, target_date_str):
                 if present[0]['pic'] == present[1]['pic'] and present[1]['pic'] == present[2]['pic']:
                     teks_present = f"(OEE/SIC/QC oleh: {present[0]['pic']})"
                 else:
-                    teks_str = " dan ".join([f"{p['name']} oleh: {p['pic']}" for p in present])
+                    teks_str = " dan ".join([f"{p} oleh: {p['pic']}" for p in present])
                     teks_present = f"({teks_str})"
                     
             teks_pic_log = f"{teks_missing} {teks_present}".strip()
             
             mismatch_list.append({
                 'tipe': "KELALAIAN_INPUT",
+                'tanggal': item['tanggal'],
                 'mesin': item['mesin'],
                 'batch': item['batch'],
                 'keterangan': ket,
@@ -295,19 +299,19 @@ def audit_compliance_data(df_oee, df_sic, df_qc, target_date_str):
             tot_sic_m = (h_sic * 60) + m_sic
             
             diff_m = tot_sic_m - tot_oee_m
-            if diff_m < -720:
-                diff_m += 1440
+            if diff_m < -720: diff_m += 1440
                 
             if diff_m > 30:
                 mismatch_list.append({
                     'tipe': "KELALAIAN_INPUT",
+                    'tanggal': item['tanggal'],
                     'mesin': item['mesin'],
                     'batch': item['batch'],
                     'keterangan': f"Input Terdelay {diff_m} Menit (Mulai OEE: {item['jamMulaiOEE'].strftime('%H:%M')} | SIC Pertama: {item['tsSICPertama'].strftime('%H:%M')})",
                     'pic': f"(OEE/SIC oleh: {item['operator']})"
                 })
 
-        # Audit Akurasi Output (OEE vs SIC)
+        # Audit Akurasi Output
         if item['oee'] and item['sic'] and not is_eksklusi_akurasi:
             selisih = item['oeeOutput'] - item['sicOutput']
             akurasi_batch = 100.0
@@ -323,6 +327,7 @@ def audit_compliance_data(df_oee, df_sic, df_qc, target_date_str):
             if selisih != 0:
                 mismatch_list.append({
                     'tipe': "SELISIH_OUTPUT",
+                    'tanggal': item['tanggal'],
                     'mesin': item['mesin'],
                     'batch': item['batch'],
                     'oeeOut': item['oeeOutput'],
@@ -332,25 +337,62 @@ def audit_compliance_data(df_oee, df_sic, df_qc, target_date_str):
                     'pic': item['operator']
                 })
 
-    skor_dept_oee_sic_pct = round((dept_patuh_oee_sic / dept_total_oee_sic) * 100) if dept_total_oee_sic > 0 else 100
-    skor_dept_qc_pct = round((dept_patuh_qc / dept_total_qc) * 100) if dept_total_qc > 0 else 100
-    skor_akurasi_pct = round(total_persentase_akurasi / total_batch_akurasi_diuji) if total_batch_akurasi_diuji > 0 else 100
-    
+    # Agregasi Tim QC
+    for qc_key, qc_item in global_qc_map.items():
+        user_qc = qc_item['user']
+        if user_qc and user_qc != "-":
+            if user_qc not in qc_user_stats:
+                qc_user_stats[user_qc] = {'total': 0, 'patuh': 0}
+            qc_user_stats[user_qc]['total'] += 1
+            if qc_item['lastStatus'] in ["Selesai Proses", "AKHIR"]:
+                qc_user_stats[user_qc]['patuh'] += 1
+
+    # PERBAIKAN METRIK HAPUS '100% (0/0)' JIKA TIDAK ADA DATA
+    if dept_total_oee_sic > 0:
+        skor_dept_oee_sic_str = f"{round((dept_patuh_oee_sic / dept_total_oee_sic) * 100)}% ({round(dept_patuh_oee_sic)}/{dept_total_oee_sic})"
+    else:
+        skor_dept_oee_sic_str = "N/A (Tidak ada data)"
+
+    if dept_total_qc > 0:
+        skor_dept_qc_str = f"{round((dept_patuh_qc / dept_total_qc) * 100)}% ({round(dept_patuh_qc)}/{dept_total_qc})"
+    else:
+        skor_dept_qc_str = "N/A (Tidak ada data)"
+
+    if total_batch_akurasi_diuji > 0:
+        skor_akurasi_str = f"{round(total_persentase_akurasi / total_batch_akurasi_diuji)}%"
+    else:
+        skor_akurasi_str = "N/A (Tidak ada data)"
+
+    # DataFrame Visual Compliance Produksi
+    prod_chart_list = []
+    for op, s in prod_user_stats.items():
+        rate = round((s['patuh'] / s['total']) * 100, 2) if s['total'] > 0 else 0.0
+        prod_chart_list.append({'Operator': op, 'Total Batch': s['total'], 'Compliance Rate (%)': rate})
+    df_prod_compliance = pd.DataFrame(prod_chart_list)
+
+    # DataFrame Visual Compliance QC
+    qc_chart_list = []
+    for op, s in qc_user_stats.items():
+        rate = round((s['patuh'] / s['total']) * 100, 2) if s['total'] > 0 else 0.0
+        qc_chart_list.append({'Inspector QC': op, 'Total Batch': s['total'], 'Compliance Rate (%)': rate})
+    df_qc_compliance = pd.DataFrame(qc_chart_list)
+
     return {
-        'skorDeptOEESIC': f"{skor_dept_oee_sic_pct}% ({round(dept_patuh_oee_sic)}/{dept_total_oee_sic})",
-        'skorDeptQC': f"{skor_dept_qc_pct}% ({round(dept_patuh_qc)}/{dept_total_qc})",
-        'skorAkurasi': f"{skor_akurasi_pct}%",
+        'totalBatches': dept_total_oee_sic,
+        'skorDeptOEESIC': skor_dept_oee_sic_str,
+        'skorDeptQC': skor_dept_qc_str,
+        'skorAkurasi': skor_akurasi_str,
         'mismatchList': mismatch_list,
-        'totalReproses': global_reproses,
-        'totalReject': global_reject
+        'dfProdCompliance': df_prod_compliance,
+        'dfQCCompliance': df_qc_compliance
     }
 
 # ============================================================
-# 3. GENERATOR RAPPORT CARD OPERATOR & UNASSIGNED QC
+# 3. GENERATOR RAPPORT CARD INDIVIDUAL & UNASSIGNED QC
 # ============================================================
 
-def get_rapport_cards(df_oee, df_sic, df_qc, target_date_str):
-    audit_res = audit_compliance_data(df_oee, df_sic, df_qc, target_date_str)
+def get_rapport_cards_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
+    audit_res = audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str)
     mismatch_list = audit_res.get('mismatchList', [])
     
     operator_map = {}
@@ -371,9 +413,9 @@ def get_rapport_cards(df_oee, df_sic, df_qc, target_date_str):
         if item['tipe'] == "KELALAIAN_INPUT":
             ket = item.get('keterangan', '')
 
-            # 1. QC Kosong -> Section Unassigned QC
             if ket == "QC Kosong":
                 qc_pending_list.append({
+                    'tanggal': item.get('tanggal', ''),
                     'mesin': item['mesin'],
                     'batch': item['batch'],
                     'keterangan': "Form QC Belum Diisi",
@@ -381,9 +423,9 @@ def get_rapport_cards(df_oee, df_sic, df_qc, target_date_str):
                 })
                 continue
 
-            # 2. Isu Produksi (OEE / SIC)
             ket_prod = ket.replace(" dan QC", "").replace("QC dan ", "").replace("QC Kosong", "").strip()
             item_prod = {
+                'tanggal': item.get('tanggal', ''),
                 'mesin': item['mesin'],
                 'batch': item['batch'],
                 'keterangan': ket_prod or "Form Produksi Kosong",
@@ -436,11 +478,14 @@ def get_rapport_cards(df_oee, df_sic, df_qc, target_date_str):
         })
 
     return {
+        'totalBatches': audit_res['totalBatches'],
         'skorDeptOEESIC': audit_res['skorDeptOEESIC'],
         'skorDeptQC': audit_res['skorDeptQC'],
         'skorAkurasi': audit_res['skorAkurasi'],
         'operatorCards': result_operators,
-        'qcPendingList': qc_pending_list
+        'qcPendingList': qc_pending_list,
+        'dfProdCompliance': audit_res['dfProdCompliance'],
+        'dfQCCompliance': audit_res['dfQCCompliance']
     }
 
 # ============================================================
@@ -458,10 +503,10 @@ def send_fonnte_wa(token, target, message):
     except Exception as e:
         return {"status": False, "reason": str(e)}
 
-def build_wa_msg_operator(card_data, tgl_str):
+def build_wa_msg_operator(card_data, periode_str):
     msg = "📋 *RAPPORT CARD COMPLIANCE OPERATOR*\n"
     msg += f"👤 Operator: *{card_data['operator']}*\n"
-    msg += f"📅 Tanggal: {tgl_str}\n"
+    msg += f"📅 Periode: {periode_str}\n"
     msg += f"🏭 Mesin: {card_data['mesinList']}\n"
     msg += "────────────────────────\n"
     msg += f"🎯 *STATUS*: *{card_data['statusCompliance']}*\n"
@@ -470,27 +515,30 @@ def build_wa_msg_operator(card_data, tgl_str):
     if card_data.get('kelalaianInput'):
         msg += "❌ *1. Kelalaian Input Form Produksi / Late Log:*\n"
         for k in card_data['kelalaianInput']:
-            msg += f" • {k['mesin']} | Batch: {k['batch']}\n   ↳ _{k['keterangan']}_\n"
+            tgl_k = f" ({k['tanggal']})" if k.get('tanggal') else ""
+            msg += f" • {k['mesin']}{tgl_k} | Batch: {k['batch']}\n   ↳ _{k['keterangan']}_\n"
         msg += "\n"
 
     if card_data.get('selisihOutput'):
         msg += "⚠️ *2. Selisih Output Data (OEE vs SIC):*\n"
         for s in card_data['selisihOutput']:
+            tgl_s = f" ({s['tanggal']})" if s.get('tanggal') else ""
             sign = "+" if s['selisih'] > 0 else ""
-            msg += f" • {s['mesin']} | Batch: {s['batch']}\n   ↳ Akurasi: {s['akurasi']} (OEE: {s['oeeOut']} vs SIC: {s['sicOut']} | Diff: {sign}{s['selisih']})\n"
+            msg += f" • {s['mesin']}{tgl_s} | Batch: {s['batch']}\n   ↳ Akurasi: {s['akurasi']} (OEE: {s['oeeOut']} vs SIC: {s['sicOut']} | Diff: {sign}{s['selisih']})\n"
         msg += "\n"
 
     msg += "────────────────────────\n_Mohon diperbaiki pada shift berjalan. Terima kasih!_"
     return msg
 
-def build_wa_msg_qc(qc_list, tgl_str):
+def build_wa_msg_qc(qc_list, periode_str):
     msg = "🚨 *ALERT UNASSIGNED LOG QC (MISSED CHECKLIST)* 🚨\n"
-    msg += f"📅 Periode: {tgl_str}\n"
+    msg += f"📅 Periode: {periode_str}\n"
     msg += "────────────────────────\n"
     msg += "Berikut batch produksi yang *BELUM diisi Form QC-nya*:\n\n"
 
     for idx, item in enumerate(qc_list, 1):
-        msg += f"{idx}. *{item['mesin']}*\n"
+        tgl_q = f" ({item['tanggal']})" if item.get('tanggal') else ""
+        msg += f"{idx}. *{item['mesin']}*{tgl_q}\n"
         msg += f"   • Batch: {item['batch']}\n"
         msg += f"   • Status: _{item['keterangan']}_\n"
         msg += f"   • {item['picLog']}\n\n"
