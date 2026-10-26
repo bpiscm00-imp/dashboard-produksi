@@ -9,21 +9,41 @@ import requests
 
 def extract_full_machine_name(row):
     """
-    Memastikan nama mesin selalu membawa nomor line/mesin 
-    meskipun kolom NAMA_MESIN dan NO_MESIN_LINE terpisah di Raw Data.
+    Mengecek seluruh kemungkinan nama kolom di Google Sheet 
+    untuk memastikan nama mesin dan nomor line selalu tergabung.
     """
-    mesin_full = str(row.get('MESIN_FULL', '')).strip()
-    if mesin_full and mesin_full.lower() not in ['nan', 'none', '', '<na>']:
-        return mesin_full
+    if isinstance(row, dict):
+        get_val = lambda k: row.get(k, '')
+    else:
+        get_val = lambda k: row[k] if k in row.index else ''
+
+    # 1. Cek jika MESIN_FULL / FULL_MESIN sudah terisi
+    for col in ['MESIN_FULL', 'FULL_MESIN', 'NAMA_MESIN_FULL']:
+        v = str(get_val(col)).strip()
+        if v and v.lower() not in ['nan', 'none', '', '<na>']:
+            return v
     
-    nama_mesin = str(row.get('NAMA_MESIN', row.get('PROSES', ''))).strip()
-    no_line = str(row.get('NO_MESIN_LINE', row.get('NO_MESIN', ''))).strip().replace('.0', '')
-    
-    # Jika nomor line ada dan belum tergabung di nama_mesin, gabungkan
-    if no_line and no_line.lower() not in ['nan', 'none', '', '0'] and no_line not in nama_mesin:
+    # 2. Ambil Nama Mesin Basis
+    nama_mesin = ""
+    for col in ['NAMA_MESIN', 'NAMA MESIN', 'MESIN', 'PROSES', 'NAMA PROSES']:
+        v = str(get_val(col)).strip()
+        if v and v.lower() not in ['nan', 'none', '', '<na>']:
+            nama_mesin = v
+            break
+
+    # 3. Ambil Nomor Line / Mesin (Mencakup variasi nama kolom header)
+    no_line = ""
+    for col in ['NO_MESIN_LINE', 'NO MESIN LINE', 'NO_MESIN', 'NO MESIN', 'LINE', 'NO_LINE', 'NO LINE', 'LINE_NO', 'LINE NO', 'NOMOR_LINE', 'NOMOR LINE']:
+        v = str(get_val(col)).strip().replace('.0', '')
+        if v and v.lower() not in ['nan', 'none', '', '<na>', '0']:
+            no_line = v
+            break
+
+    # 4. Gabungkan jika no_line belum ada di nama_mesin
+    if no_line and no_line not in nama_mesin:
         return f"{nama_mesin} - {no_line}"
     
-    return nama_mesin
+    return nama_mesin or "Mesin Tidak Diketahui"
 
 def normalisasi_mesin(nama_mentah):
     if not nama_mentah or pd.isna(nama_mentah):
@@ -40,7 +60,7 @@ def normalisasi_mesin(nama_mentah):
         return f"MO - {nomor or 'Tanpa No'}"
     if any(x in text for x in ["TIMBANG", "PENIMBANGAN", "TB"]) or text.startswith(("TB ", "TB-")):
         return f"TIMBANG - {nomor or 'Tanpa No'}"
-    if "TRIROLER" in text or text.startswith(("TR ", "TR-")) or text.startswith("TR"):
+    if "TRIROLER" in text or "THREE ROLL" in text or text.startswith(("TR ", "TR-")) or text.startswith("TR"):
         return f"TR - {nomor or 'Tanpa No'}"
     if "MIXING SERBUK" in text or text.startswith(("MS ", "MS-")) or text.startswith("MS"):
         return f"MS - {nomor or 'Tanpa No'}"
@@ -50,7 +70,7 @@ def normalisasi_mesin(nama_mentah):
         return f"FM - {nomor or 'Tanpa No'}"
     if "PRESS" in text:
         return f"Press - {nomor or 'Tanpa No'}"
-    if "PACKING LINE" in text:
+    if "PACKING LINE" in text or text.startswith("PL"):
         return f"PACKING LINE - {nomor or 'Tanpa No'}"
     
     return text
@@ -58,12 +78,17 @@ def normalisasi_mesin(nama_mentah):
 def normalisasi_batch(batch_mentah):
     if not batch_mentah or pd.isna(batch_mentah):
         return ""
-    return re.sub(r'\s+', '', str(batch_mentah)).strip().upper()
+    b = str(batch_mentah).strip().upper()
+    b = re.sub(r'\s+', '', b)
+    b = re.sub(r'^[\'\"]|[\'\"]$', '', b)
+    return b
 
 def normalisasi_operator(nama_mentah):
     if not nama_mentah or pd.isna(nama_mentah):
         return "-"
-    return re.sub(r'\s+', ' ', str(nama_mentah)).strip().upper()
+    op = str(nama_mentah).strip().upper()
+    op = re.sub(r'\s+', ' ', op)
+    return op if op not in ['NAN', 'NONE', '', '<NA>', '0'] else "-"
 
 def get_fiscal_date(dt_ts, oee_batches_today, oee_batches_yesterday, batch_no):
     if pd.isna(dt_ts) or dt_ts is None:
@@ -123,11 +148,10 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
         if start_date_str <= tgl_acuan <= end_date_str:
             raw_mesin_str = extract_full_machine_name(row)
             mesin = normalisasi_mesin(raw_mesin_str)
-            output_fg = pd.to_numeric(row.get('CAPAIN_PRODUKSI_PCS', 0), errors='coerce') or 0
+            output_fg = pd.to_numeric(row.get('CAPAIN_PRODUKSI_PCS', row.get('CAPAIAN_PRODUKSI_PCS', 0)), errors='coerce') or 0
             op = normalisasi_operator(row.get('OPERATOR', row.get('NAMA_OPERATOR')))
             jam_mulai = pd.to_datetime(row.get('JAM_MULAI'), errors='coerce')
             
-            # Key tanpa memasukkan operator agar OEE & SIC selalu dapat dicocokkan secara independen
             key = f"{tgl_acuan}_{batch}_{mesin}"
             
             if key not in master_log:
@@ -142,7 +166,7 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             master_log[key]['oeeOutput'] += output_fg
             master_log[key]['picOee'] = op
             if op != "-": master_log[key]['operator'] = op
-            master_log[key]['jamMulaiOEE'] = jam_mulai
+            if pd.notna(jam_mulai): master_log[key]['jamMulaiOEE'] = jam_mulai
             
             selesai = pd.to_datetime(row.get('JAM_SELESAI'), errors='coerce')
             if pd.notna(selesai) and pd.notna(ts_oee) and ts_oee < (selesai - timedelta(minutes=30)):
@@ -167,7 +191,6 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             op = normalisasi_operator(row.get('OPERATOR', row.get('NAMA_OPERATOR')))
             status = str(row.get('STATUS_ALUR', '')).strip()
             
-            # Key tanpa memasukkan operator agar OEE & SIC selalu dapat dicocokkan secara independen
             key = f"{fiscal_date_sic}_{batch}_{mesin}"
             
             if key not in master_log:
@@ -370,7 +393,7 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             if qc_item['lastStatus'] in ["Selesai Proses", "AKHIR"]:
                 qc_user_stats[user_qc]['patuh'] += 1
 
-    # Format Tampilan Metrik (Tampilkan N/A jika Tidak Ada Batch)
+    # Format Tampilan Metrik
     if dept_total_oee_sic > 0:
         skor_dept_oee_sic_str = f"{round((dept_patuh_oee_sic / dept_total_oee_sic) * 100)}% ({round(dept_patuh_oee_sic)}/{dept_total_oee_sic})"
     else:
@@ -386,14 +409,12 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
     else:
         skor_akurasi_str = "N/A (Tidak ada data)"
 
-    # DataFrame Visual Compliance Produksi
     prod_chart_list = []
     for op, s in prod_user_stats.items():
         rate = round((s['patuh'] / s['total']) * 100, 2) if s['total'] > 0 else 0.0
         prod_chart_list.append({'Operator': op, 'Total Batch': s['total'], 'Compliance Rate (%)': rate})
     df_prod_compliance = pd.DataFrame(prod_chart_list)
 
-    # DataFrame Visual Compliance QC
     qc_chart_list = []
     for op, s in qc_user_stats.items():
         rate = round((s['patuh'] / s['total']) * 100, 2) if s['total'] > 0 else 0.0
@@ -409,10 +430,6 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
         'dfProdCompliance': df_prod_compliance,
         'dfQCCompliance': df_qc_compliance
     }
-
-# ============================================================
-# 3. GENERATOR RAPPORT CARD INDIVIDUAL & UNASSIGNED QC
-# ============================================================
 
 def get_rapport_cards_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
     audit_res = audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str)
@@ -510,10 +527,6 @@ def get_rapport_cards_range(df_oee, df_sic, df_qc, start_date_str, end_date_str)
         'dfProdCompliance': audit_res['dfProdCompliance'],
         'dfQCCompliance': audit_res['dfQCCompliance']
     }
-
-# ============================================================
-# 4. FONNTE WHATSAPP BLAST INTEGRATION
-# ============================================================
 
 def send_fonnte_wa(token, target, message):
     url = "https://api.fonnte.com/send"
