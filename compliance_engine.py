@@ -14,14 +14,12 @@ def normalisasi_mesin(nama_mentah):
     text = re.sub(r'\s+', ' ', str(nama_mentah)).strip().upper()
     text = re.sub(r'^([A-Z\s]+?)\s*[-_]?\s*(\d+)$', r'\1 - \2', text)
     
-    if "MIXING" in text and "SERBUK" not in text:
-        match_no = re.search(r'-?\s*(\d+)\s*$', text) or re.search(r'\d+$', text)
-        nomor = match_no.group(1) if match_no else "Tanpa No"
-        return f"MO - {nomor}"
-    
     match_num = re.search(r'\d+', text)
-    nomor = match_num.group(0) if match_num else ""
+    # Ubah ke int() terlebih dahulu agar "02" menjadi 2
+    nomor = str(int(match_num.group(0))) if match_num else ""
     
+    if "MIXING" in text and "SERBUK" not in text:
+        return f"MO - {nomor or 'Tanpa No'}"
     if any(x in text for x in ["TIMBANG", "PENIMBANGAN", "TB"]) or text.startswith(("TB ", "TB-")):
         return f"TIMBANG - {nomor or 'Tanpa No'}"
     if "TRIROLER" in text or text.startswith(("TR ", "TR-")) or text.startswith("TR"):
@@ -110,20 +108,19 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             op = normalisasi_operator(row.get('OPERATOR', row.get('NAMA_OPERATOR')))
             jam_mulai = pd.to_datetime(row.get('JAM_MULAI'), errors='coerce')
             
-            key = f"{tgl_acuan}_{batch}_{mesin}_{op}"
+            key = f"{tgl_acuan}_{batch}_{mesin}"
             
             if key not in master_log:
-                master_log[key] = {
+                    master_log[key] = {
                     'tanggal': tgl_acuan, 'batch': batch, 'mesin': mesin, 'operator': op,
                     'oee': False, 'sic': False, 'oeeOutput': 0, 'sicOutput': 0,
                     'picOee': op, 'picSic': "-", 'picQc': "-", 'oeeTepatWaktu': True,
                     'sicRows': 0, 'sicLastStatus': "", 'jamMulaiOEE': None, 'tsSICPertama': None
                 }
-                
             master_log[key]['oee'] = True
             master_log[key]['oeeOutput'] += output_fg
             master_log[key]['picOee'] = op
-            master_log[key]['jamMulaiOEE'] = jam_mulai
+            if op != "-": master_log[key]['operator'] = op
             
             selesai = pd.to_datetime(row.get('JAM_SELESAI'), errors='coerce')
             if pd.notna(selesai) and pd.notna(ts_oee) and ts_oee < (selesai - timedelta(minutes=30)):
@@ -147,7 +144,7 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             op = normalisasi_operator(row.get('OPERATOR', row.get('NAMA_OPERATOR')))
             status = str(row.get('STATUS_ALUR', '')).strip()
             
-            key = f"{fiscal_date_sic}_{batch}_{mesin}_{op}"
+            key = f"{fiscal_date_sic}_{batch}_{mesin}"
             
             if key not in master_log:
                 master_log[key] = {
@@ -156,15 +153,10 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
                     'picOee': "-", 'picSic': op, 'picQc': "-", 'oeeTepatWaktu': True,
                     'sicRows': 0, 'sicLastStatus': "", 'jamMulaiOEE': None, 'tsSICPertama': None
                 }
-                
             master_log[key]['sic'] = True
             master_log[key]['sicOutput'] += output_jam
             master_log[key]['picSic'] = op
-            master_log[key]['sicRows'] += 1
-            master_log[key]['sicLastStatus'] = status
-            
-            if master_log[key]['tsSICPertama'] is None or ts < master_log[key]['tsSICPertama']:
-                master_log[key]['tsSICPertama'] = ts
+            if master_log[key]['operator'] == "-": master_log[key]['operator'] = op
 
     # C. PROSES DATA QC
     for _, row in df_qc.iterrows():
