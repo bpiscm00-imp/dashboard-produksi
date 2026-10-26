@@ -1,0 +1,499 @@
+import re
+from datetime import datetime, timedelta
+import pandas as pd
+import requests
+
+# ============================================================
+# 1. HELPER NORMALISASI & TANGGAL FISKAL
+# ============================================================
+
+def normalisasi_mesin(nama_mentah):
+    if not nama_mentah or pd.isna(nama_mentah):
+        return "Mesin Tidak Diketahui"
+    
+    text = re.sub(r'\s+', ' ', str(nama_mentah)).strip().upper()
+    text = re.sub(r'^([A-Z\s]+?)\s*[-_]?\s*(\d+)$', r'\1 - \2', text)
+    
+    if "MIXING" in text and "SERBUK" not in text:
+        match_no = re.search(r'-?\s*(\d+)\s*$', text) or re.search(r'\d+$', text)
+        nomor = match_no.group(1) if match_no else "Tanpa No"
+        return f"MO - {nomor}"
+    
+    match_num = re.search(r'\d+', text)
+    nomor = match_num.group(0) if match_num else ""
+    
+    if any(x in text for x in ["TIMBANG", "PENIMBANGAN", "TB"]) or text.startswith(("TB ", "TB-")):
+        return f"TIMBANG - {nomor or 'Tanpa No'}"
+    if "TRIROLER" in text or text.startswith(("TR ", "TR-")) or text.startswith("TR"):
+        return f"TR - {nomor or 'Tanpa No'}"
+    if "MIXING SERBUK" in text or text.startswith(("MS ", "MS-")) or text.startswith("MS"):
+        return f"MS - {nomor or 'Tanpa No'}"
+    if "FILLING OTOMATIS" in text or text.startswith("FO"):
+        return f"FO - {nomor or 'Tanpa No'}"
+    if "FILLING MANUAL" in text or text.startswith("FM"):
+        return f"FM - {nomor or 'Tanpa No'}"
+    if "PRESS" in text:
+        return f"Press - {nomor or 'Tanpa No'}"
+    if "PACKING LINE" in text:
+        return f"PACKING LINE - {nomor or 'Tanpa No'}"
+    
+    return text
+
+def normalisasi_batch(batch_mentah):
+    if not batch_mentah or pd.isna(batch_mentah):
+        return ""
+    return re.sub(r'\s+', '', str(batch_mentah)).strip().upper()
+
+def normalisasi_operator(nama_mentah):
+    if not nama_mentah or pd.isna(nama_mentah):
+        return "-"
+    return re.sub(r'\s+', ' ', str(nama_mentah)).strip().upper()
+
+def get_fiscal_date(dt_ts, oee_batches_today, oee_batches_yesterday, batch_no):
+    if pd.isna(dt_ts) or dt_ts is None:
+        return None
+    
+    jam = dt_ts.hour
+    menit = dt_ts.minute
+    ts_date_str = dt_ts.strftime('%Y-%m-%d')
+    yesterday_str = (dt_ts - timedelta(days=1)).strftime('%Y-%m-%d')
+    
+    is_overlap = (jam == 6 and menit < 15)
+    
+    if is_overlap:
+        in_today = batch_no in oee_batches_today.get(ts_date_str, {})
+        in_yesterday = batch_no in oee_batches_yesterday.get(yesterday_str, {})
+        return ts_date_str if (in_today and not in_yesterday) else yesterday_str
+    else:
+        return yesterday_str if jam < 6 else ts_date_str
+
+# ============================================================
+# 2. ENGINE AUDIT KEPATUHAN & INTEGRASI 3-FORM
+# ============================================================
+
+def audit_compliance_data(df_oee, df_sic, df_qc, target_date_str):
+    master_log = {}
+    oee_batches_per_date = {}
+    global_qc_map = {}
+    
+    total_qc_indiv, patuh_qc_indiv = 0, 0
+    global_reproses, global_reject = 0, 0
+
+    # A. PROSES DATA OEE
+    for _, row in df_oee.iterrows():
+        ts_oee = pd.to_datetime(row.get('TIMESTAMP'), errors='coerce')
+        tgl_prod_oee = pd.to_datetime(row.get('TANGGAL_PRODUKSI', row.get('TIMESTAMP')), errors='coerce')
+        
+        if pd.isna(ts_oee):
+            continue
+            
+        ts_oee_str = ts_oee.strftime('%Y-%m-%d')
+        tgl_prod_str = tgl_prod_oee.strftime('%Y-%m-%d') if pd.notna(tgl_prod_oee) else ts_oee_str
+        
+        is_before_cutoff = (ts_oee.hour < 6) or (ts_oee.hour == 6 and ts_oee.minute < 15)
+        if ts_oee_str != tgl_prod_str:
+            tgl_acuan = tgl_prod_str
+        else:
+            tgl_acuan = (ts_oee - timedelta(days=1)).strftime('%Y-%m-%d') if is_before_cutoff else ts_oee_str
+            
+        batch = normalisasi_batch(row.get('NO_BATCH'))
+        if not batch:
+            continue
+            
+        if tgl_acuan not in oee_batches_per_date:
+            oee_batches_per_date[tgl_acuan] = {}
+        oee_batches_per_date[tgl_acuan][batch] = True
+        
+        if tgl_acuan == target_date_str:
+            mesin = normalisasi_mesin(row.get('MESIN_FULL', row.get('NAMA_MESIN')))
+            output_fg = pd.to_numeric(row.get('CAPAIN_PRODUKSI_PCS', 0), errors='coerce') or 0
+            op = normalisasi_operator(row.get('OPERATOR', row.get('NAMA_OPERATOR')))
+            jam_mulai = pd.to_datetime(row.get('JAM_MULAI'), errors='coerce')
+            
+            key = f"{batch}_{mesin}_{op}"
+            
+            if key not in master_log:
+                master_log[key] = {
+                    'batch': batch, 'mesin': mesin, 'operator': op,
+                    'oee': False, 'sic': False, 'oeeOutput': 0, 'sicOutput': 0,
+                    'picOee': op, 'picSic': "-", 'picQc': "-", 'oeeTepatWaktu': True,
+                    'sicRows': 0, 'sicLastStatus': "", 'jamMulaiOEE': None, 'tsSICPertama': None
+                }
+                
+            master_log[key]['oee'] = True
+            master_log[key]['oeeOutput'] += output_fg
+            master_log[key]['picOee'] = op
+            master_log[key]['jamMulaiOEE'] = jam_mulai
+            
+            selesai = pd.to_datetime(row.get('JAM_SELESAI'), errors='coerce')
+            if pd.notna(selesai) and pd.notna(ts_oee) and ts_oee < (selesai - timedelta(minutes=30)):
+                master_log[key]['oeeTepatWaktu'] = False
+
+    # B. PROSES DATA SIC
+    for _, row in df_sic.iterrows():
+        ts = pd.to_datetime(row.get('TIMESTAMP'), errors='coerce')
+        if pd.isna(ts):
+            continue
+            
+        batch = normalisasi_batch(row.get('NO_BATCH'))
+        if not batch:
+            continue
+            
+        fiscal_date_sic = get_fiscal_date(ts, oee_batches_per_date, oee_batches_per_date, batch)
+        
+        if fiscal_date_sic == target_date_str:
+            mesin = normalisasi_mesin(row.get('NAMA_MESIN'))
+            output_jam = pd.to_numeric(row.get('OUTPUT_PCS', 0), errors='coerce') or 0
+            op = normalisasi_operator(row.get('OPERATOR', row.get('NAMA_OPERATOR')))
+            status = str(row.get('STATUS_ALUR', '')).strip()
+            
+            key = f"{batch}_{mesin}_{op}"
+            
+            if key not in master_log:
+                master_log[key] = {
+                    'batch': batch, 'mesin': mesin, 'operator': op,
+                    'oee': False, 'sic': False, 'oeeOutput': 0, 'sicOutput': 0,
+                    'picOee': "-", 'picSic': op, 'picQc': "-", 'oeeTepatWaktu': True,
+                    'sicRows': 0, 'sicLastStatus': "", 'jamMulaiOEE': None, 'tsSICPertama': None
+                }
+                
+            master_log[key]['sic'] = True
+            master_log[key]['sicOutput'] += output_jam
+            master_log[key]['picSic'] = op
+            master_log[key]['sicRows'] += 1
+            master_log[key]['sicLastStatus'] = status
+            
+            if master_log[key]['tsSICPertama'] is None or ts < master_log[key]['tsSICPertama']:
+                master_log[key]['tsSICPertama'] = ts
+
+    # C. PROSES DATA QC
+    for _, row in df_qc.iterrows():
+        ts_qc = pd.to_datetime(row.get('TIMESTAMP'), errors='coerce')
+        if pd.isna(ts_qc):
+            continue
+            
+        batch = normalisasi_batch(row.get('NO_BATCH'))
+        if not batch:
+            continue
+            
+        fiscal_date_qc = get_fiscal_date(ts_qc, oee_batches_per_date, oee_batches_per_date, batch)
+        
+        if fiscal_date_qc == target_date_str:
+            mesin = normalisasi_mesin(row.get('NAMA_MESIN'))
+            reproses = pd.to_numeric(row.get('REPROSES_PCS', 0), errors='coerce') or 0
+            reject = pd.to_numeric(row.get('REJECT_PCS', 0), errors='coerce') or 0
+            op_qc = normalisasi_operator(row.get('INSPEKTOR', row.get('OPERATOR', row.get('NAMA_OPERATOR'))))
+            status = str(row.get('STATUS_ALUR', '')).strip()
+            
+            total_qc_indiv += 1
+            if status in ["Selesai Proses", "AKHIR"]:
+                patuh_qc_indiv += 1
+                
+            qc_lookup_key = f"{batch}_{mesin}"
+            if qc_lookup_key not in global_qc_map:
+                global_qc_map[qc_lookup_key] = {'terisi': True, 'rows': 0, 'lastStatus': status, 'user': op_qc}
+            global_qc_map[qc_lookup_key]['rows'] += 1
+            global_qc_map[qc_lookup_key]['lastStatus'] = status
+            global_qc_map[qc_lookup_key]['user'] = op_qc
+            
+            global_reproses += reproses
+            global_reject += reject
+
+    # D. DUAL EVALUATION ENGINE & AUDIT MISMATCH
+    mismatch_list = []
+    indiv_total_oee, indiv_patuh_oee = 0, 0
+    indiv_total_sic, indiv_patuh_sic = 0, 0
+    dept_total_oee_sic, dept_patuh_oee_sic = 0, 0
+    dept_total_qc, dept_patuh_qc = 0, 0
+    total_batch_akurasi_diuji, total_persentase_akurasi = 0, 0
+    
+    for key, item in master_log.items():
+        qc_key = f"{item['batch']}_{item['mesin']}"
+        has_qc_data = qc_key in global_qc_map
+        if has_qc_data:
+            item['picQc'] = global_qc_map[qc_key]['user']
+            
+        mesin_upper = item['mesin'].upper()
+        is_proses_timbang = any(x in mesin_upper for x in ["TIMBANG", "PENIMBANGAN", "TB"])
+        is_eksklusi_akurasi = any(x in mesin_upper for x in ["MO", "MS", "TR", "HAMMER"]) or is_proses_timbang
+        
+        if item['oee']:
+            indiv_total_oee += 1
+            if item['oeeTepatWaktu']: indiv_patuh_oee += 1
+            
+        if item['sic']:
+            indiv_total_sic += 1
+            sic_ok = item['sicLastStatus'] in ["Selesai Proses", "SELESAI", "Istirahat"]
+            if sic_ok: indiv_patuh_sic += 1
+            elif item['sicRows'] > 1: indiv_patuh_sic += 0.7
+            
+        if item['oee'] or item['sic']:
+            dept_total_oee_sic += 1
+            if item['oee'] and item['sic']:
+                oee_ok = item['oeeTepatWaktu']
+                sic_ok = item['sicLastStatus'] in ["Selesai Proses", "SELESAI", "Istirahat"]
+                if oee_ok and sic_ok: dept_patuh_oee_sic += 1
+                elif oee_ok and item['sicRows'] > 1: dept_patuh_oee_sic += 0.7
+                
+            if not is_proses_timbang:
+                dept_total_qc += 1
+                if has_qc_data:
+                    qc_status = global_qc_map[qc_key]['lastStatus']
+                    qc_rows = global_qc_map[qc_key]['rows']
+                    if qc_status in ["Selesai Proses", "AKHIR"]: dept_patuh_qc += 1
+                    elif qc_rows > 1: dept_patuh_qc += 0.7
+                    
+        # Audit Kelalaian Input
+        missing = []
+        if not item['oee']: missing.append("OEE")
+        if not item['sic']: missing.append("SIC")
+        if not has_qc_data and not is_proses_timbang: missing.append("QC")
+        
+        if missing:
+            if len(missing) == 1: ket = f"{missing[0]} Kosong"
+            elif len(missing) == 2: ket = f"{missing[0]} dan {missing[1]} Kosong"
+            else: ket = "OEE, SIC, dan QC Kosong"
+            
+            present = []
+            if item['oee'] and item['picOee'] != "-": present.append({'name': "OEE", 'pic': item['picOee']})
+            if item['sic'] and item['picSic'] != "-": present.append({'name': "SIC", 'pic': item['picSic']})
+            if has_qc_data and item['picQc'] != "-" and not is_proses_timbang: present.append({'name': "QC", 'pic': item['picQc']})
+            
+            teks_missing = " & ".join(missing) + " Belum Diinput"
+            teks_present = ""
+            
+            if len(present) == 1:
+                teks_present = f"({present[0]['name']} oleh: {present[0]['pic']})"
+            elif len(present) == 2:
+                if present[0]['pic'] == present[1]['pic']:
+                    teks_present = f"({present[0]['name']}/{present[1]['name']} oleh: {present[0]['pic']})"
+                else:
+                    teks_present = f"({present[0]['name']} oleh: {present[0]['pic']} dan {present[1]['name']} oleh: {present[1]['pic']})"
+            elif len(present) == 3:
+                if present[0]['pic'] == present[1]['pic'] and present[1]['pic'] == present[2]['pic']:
+                    teks_present = f"(OEE/SIC/QC oleh: {present[0]['pic']})"
+                else:
+                    teks_str = " dan ".join([f"{p['name']} oleh: {p['pic']}" for p in present])
+                    teks_present = f"({teks_str})"
+                    
+            teks_pic_log = f"{teks_missing} {teks_present}".strip()
+            
+            mismatch_list.append({
+                'tipe': "KELALAIAN_INPUT",
+                'mesin': item['mesin'],
+                'batch': item['batch'],
+                'keterangan': ket,
+                'pic': teks_pic_log
+            })
+
+        # Audit Late Log (>30 Menit)
+        if item['oee'] and item['sic'] and pd.notna(item['jamMulaiOEE']) and pd.notna(item['tsSICPertama']):
+            h_oee, m_oee = item['jamMulaiOEE'].hour, item['jamMulaiOEE'].minute
+            h_sic, m_sic = item['tsSICPertama'].hour, item['tsSICPertama'].minute
+            
+            tot_oee_m = (h_oee * 60) + m_oee
+            tot_sic_m = (h_sic * 60) + m_sic
+            
+            diff_m = tot_sic_m - tot_oee_m
+            if diff_m < -720:
+                diff_m += 1440
+                
+            if diff_m > 30:
+                mismatch_list.append({
+                    'tipe': "KELALAIAN_INPUT",
+                    'mesin': item['mesin'],
+                    'batch': item['batch'],
+                    'keterangan': f"Input Terdelay {diff_m} Menit (Mulai OEE: {item['jamMulaiOEE'].strftime('%H:%M')} | SIC Pertama: {item['tsSICPertama'].strftime('%H:%M')})",
+                    'pic': f"(OEE/SIC oleh: {item['operator']})"
+                })
+
+        # Audit Akurasi Output (OEE vs SIC)
+        if item['oee'] and item['sic'] and not is_eksklusi_akurasi:
+            selisih = item['oeeOutput'] - item['sicOutput']
+            akurasi_batch = 100.0
+            if item['oeeOutput'] > 0:
+                akurasi_batch = (1.0 - (abs(selisih) / item['oeeOutput'])) * 100.0
+                if akurasi_batch < 0: akurasi_batch = 0.0
+            elif item['sicOutput'] > 0:
+                akurasi_batch = 0.0
+                
+            total_batch_akurasi_diuji += 1
+            total_persentase_akurasi += akurasi_batch
+            
+            if selisih != 0:
+                mismatch_list.append({
+                    'tipe': "SELISIH_OUTPUT",
+                    'mesin': item['mesin'],
+                    'batch': item['batch'],
+                    'oeeOut': item['oeeOutput'],
+                    'sicOut': item['sicOutput'],
+                    'selisih': selisih,
+                    'akurasi': f"{round(akurasi_batch)}%",
+                    'pic': item['operator']
+                })
+
+    skor_dept_oee_sic_pct = round((dept_patuh_oee_sic / dept_total_oee_sic) * 100) if dept_total_oee_sic > 0 else 100
+    skor_dept_qc_pct = round((dept_patuh_qc / dept_total_qc) * 100) if dept_total_qc > 0 else 100
+    skor_akurasi_pct = round(total_persentase_akurasi / total_batch_akurasi_diuji) if total_batch_akurasi_diuji > 0 else 100
+    
+    return {
+        'skorDeptOEESIC': f"{skor_dept_oee_sic_pct}% ({round(dept_patuh_oee_sic)}/{dept_total_oee_sic})",
+        'skorDeptQC': f"{skor_dept_qc_pct}% ({round(dept_patuh_qc)}/{dept_total_qc})",
+        'skorAkurasi': f"{skor_akurasi_pct}%",
+        'mismatchList': mismatch_list,
+        'totalReproses': global_reproses,
+        'totalReject': global_reject
+    }
+
+# ============================================================
+# 3. GENERATOR RAPPORT CARD OPERATOR & UNASSIGNED QC
+# ============================================================
+
+def get_rapport_cards(df_oee, df_sic, df_qc, target_date_str):
+    audit_res = audit_compliance_data(df_oee, df_sic, df_qc, target_date_str)
+    mismatch_list = audit_res.get('mismatchList', [])
+    
+    operator_map = {}
+    qc_pending_list = []
+
+    def init_operator(name):
+        if not name or name == "-" or name == "QC": return
+        if name not in operator_map:
+            operator_map[name] = {
+                'operator': name,
+                'mesinList': set(),
+                'kelalaianInput': [],
+                'selisihOutput': [],
+                'totalIssue': 0
+            }
+
+    for item in mismatch_list:
+        if item['tipe'] == "KELALAIAN_INPUT":
+            ket = item.get('keterangan', '')
+
+            # 1. QC Kosong -> Section Unassigned QC
+            if ket == "QC Kosong":
+                qc_pending_list.append({
+                    'mesin': item['mesin'],
+                    'batch': item['batch'],
+                    'keterangan': "Form QC Belum Diisi",
+                    'picLog': item['pic']
+                })
+                continue
+
+            # 2. Isu Produksi (OEE / SIC)
+            ket_prod = ket.replace(" dan QC", "").replace("QC dan ", "").replace("QC Kosong", "").strip()
+            item_prod = {
+                'mesin': item['mesin'],
+                'batch': item['batch'],
+                'keterangan': ket_prod or "Form Produksi Kosong",
+                'pic': item['pic']
+            }
+
+            text_pic = item.get('pic', '')
+            matches = re.findall(r'(?:OEE|SIC|OEE/SIC)\s+oleh:\s*([A-Za-z0-9\s\.\-]+?)(?=\s*dan|\s*oleh|\s*\)|$)', text_pic, flags=re.IGNORECASE)
+            
+            found_any = False
+            for name_found in matches:
+                clean_name = name_found.strip()
+                if clean_name and clean_name != "-" and clean_name.upper() != "QC":
+                    init_operator(clean_name)
+                    if clean_name in operator_map:
+                        operator_map[clean_name]['kelalaianInput'].append(item_prod)
+                        operator_map[clean_name]['totalIssue'] += 1
+                        operator_map[clean_name]['mesinList'].add(item['mesin'])
+                        found_any = True
+
+            if not found_any:
+                fallback_name = "Lainnya / Non-PIC Produksi"
+                init_operator(fallback_name)
+                operator_map[fallback_name]['kelalaianInput'].append(item_prod)
+                operator_map[fallback_name]['totalIssue'] += 1
+
+        elif item['tipe'] == "SELISIH_OUTPUT":
+            op_name = item['pic']
+            init_operator(op_name)
+            if op_name in operator_map:
+                operator_map[op_name]['selisihOutput'].append(item)
+                operator_map[op_name]['totalIssue'] += 1
+                operator_map[op_name]['mesinList'].add(item['mesin'])
+
+    result_operators = []
+    for op, data in operator_map.items():
+        if data['totalIssue'] == 0: continue
+
+        status = "COMPLIANT"
+        if data['totalIssue'] > 0:
+            status = "REVIEW OUTPUT" if data['selisihOutput'] else "NON-COMPLIANT"
+
+        result_operators.append({
+            'operator': op,
+            'mesinList': ", ".join(sorted(data['mesinList'])) if data['mesinList'] else "Multi-Mesin",
+            'totalIssue': data['totalIssue'],
+            'kelalaianInput': data['kelalaianInput'],
+            'selisihOutput': data['selisihOutput'],
+            'statusCompliance': status
+        })
+
+    return {
+        'skorDeptOEESIC': audit_res['skorDeptOEESIC'],
+        'skorDeptQC': audit_res['skorDeptQC'],
+        'skorAkurasi': audit_res['skorAkurasi'],
+        'operatorCards': result_operators,
+        'qcPendingList': qc_pending_list
+    }
+
+# ============================================================
+# 4. FONNTE WHATSAPP BLAST INTEGRATION
+# ============================================================
+
+def send_fonnte_wa(token, target, message):
+    url = "https://api.fonnte.com/send"
+    headers = {"Authorization": token}
+    payload = {"target": target, "message": message}
+    
+    try:
+        response = requests.post(url, headers=headers, data=payload, timeout=10)
+        return response.json()
+    except Exception as e:
+        return {"status": False, "reason": str(e)}
+
+def build_wa_msg_operator(card_data, tgl_str):
+    msg = "📋 *RAPPORT CARD COMPLIANCE OPERATOR*\n"
+    msg += f"👤 Operator: *{card_data['operator']}*\n"
+    msg += f"📅 Tanggal: {tgl_str}\n"
+    msg += f"🏭 Mesin: {card_data['mesinList']}\n"
+    msg += "────────────────────────\n"
+    msg += f"🎯 *STATUS*: *{card_data['statusCompliance']}*\n"
+    msg += f"⚠️ *TOTAL CATATAN*: {card_data['totalIssue']} Item\n\n"
+
+    if card_data.get('kelalaianInput'):
+        msg += "❌ *1. Kelalaian Input Form Produksi / Late Log:*\n"
+        for k in card_data['kelalaianInput']:
+            msg += f" • {k['mesin']} | Batch: {k['batch']}\n   ↳ _{k['keterangan']}_\n"
+        msg += "\n"
+
+    if card_data.get('selisihOutput'):
+        msg += "⚠️ *2. Selisih Output Data (OEE vs SIC):*\n"
+        for s in card_data['selisihOutput']:
+            sign = "+" if s['selisih'] > 0 else ""
+            msg += f" • {s['mesin']} | Batch: {s['batch']}\n   ↳ Akurasi: {s['akurasi']} (OEE: {s['oeeOut']} vs SIC: {s['sicOut']} | Diff: {sign}{s['selisih']})\n"
+        msg += "\n"
+
+    msg += "────────────────────────\n_Mohon diperbaiki pada shift berjalan. Terima kasih!_"
+    return msg
+
+def build_wa_msg_qc(qc_list, tgl_str):
+    msg = "🚨 *ALERT UNASSIGNED LOG QC (MISSED CHECKLIST)* 🚨\n"
+    msg += f"📅 Periode: {tgl_str}\n"
+    msg += "────────────────────────\n"
+    msg += "Berikut batch produksi yang *BELUM diisi Form QC-nya*:\n\n"
+
+    for idx, item in enumerate(qc_list, 1):
+        msg += f"{idx}. *{item['mesin']}*\n"
+        msg += f"   • Batch: {item['batch']}\n"
+        msg += f"   • Status: _{item['keterangan']}_\n"
+        msg += f"   • {item['picLog']}\n\n"
+
+    msg += "────────────────────────\n_Mohon Supervisor QC menindaklanjuti verifikasi lini tersebut._"
+    return msg
