@@ -12,6 +12,7 @@ from compliance_engine import (
     send_fonnte_wa,
     build_wa_msg_operator,
     build_wa_msg_qc
+    is_qc_status_patuh
 )
 
 st.set_page_config(page_title="Dashboard Produksi & Kepatuhan", layout="wide")
