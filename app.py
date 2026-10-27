@@ -11,7 +11,7 @@ from compliance_engine import (
     get_rapport_cards_range,
     send_fonnte_wa,
     build_wa_msg_operator,
-    build_wa_msg_qc
+    build_wa_msg_qc,
     is_qc_status_patuh
 )
 
