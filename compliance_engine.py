@@ -644,3 +644,147 @@ def get_daily_compliance_trend(df_oee, df_sic, df_qc, start_date_str, end_date_s
             })
 
     return pd.DataFrame(daily_list)
+
+# compliance_engine.py (Tambahkan di bagian paling bawah)
+
+def get_wip_operational(df_sic, df_oee):
+    """
+    Mengolah data tracking WIP Operasional per No Batch:
+    No Batch | Subbrand | Tanggal/Jam Mulai | Proses 1 (Output) | Proses 2 (Output) | Proses 3 (Output)
+    """
+    if df_sic.empty and df_oee.empty:
+        return pd.DataFrame()
+    
+    # Gabungkan log transaksi SIC dan OEE
+    combined = []
+    
+    if not df_sic.empty:
+        for _, r in df_sic.iterrows():
+            b = str(r.get('NO_BATCH', '')).strip()
+            if b and b.upper() not in ['NAN', 'NONE', '']:
+                combined.append({
+                    'NO_BATCH': b,
+                    'SUBBRAND': r.get('SUBBRAND_MASTER', r.get('SUBBRAND', '-')),
+                    'TIMESTAMP': r.get('TIMESTAMP'),
+                    'NAMA_MESIN': str(r.get('NAMA_MESIN', '')),
+                    'OUTPUT': pd.to_numeric(r.get('OUTPUT_PCS', 0), errors='coerce') or 0
+                })
+                
+    if not df_oee.empty:
+        for _, r in df_oee.iterrows():
+            b = str(r.get('NO_BATCH', '')).strip()
+            if b and b.upper() not in ['NAN', 'NONE', '']:
+                combined.append({
+                    'NO_BATCH': b,
+                    'SUBBRAND': r.get('SUBBRAND_MASTER', r.get('VARIAN_PRODUK', '-')),
+                    'TIMESTAMP': r.get('TIMESTAMP'),
+                    'NAMA_MESIN': str(r.get('NAMA_MESIN', r.get('PROSES', ''))),
+                    'OUTPUT': pd.to_numeric(r.get('CAPAIN_PRODUKSI_PCS', 0), errors='coerce') or 0
+                })
+
+    df_comb = pd.DataFrame(combined)
+    if df_comb.empty:
+        return pd.DataFrame()
+
+    df_comb['TIMESTAMP'] = pd.to_datetime(df_comb['TIMESTAMP'], errors='coerce')
+    df_comb = df_comb.dropna(subset=['TIMESTAMP'])
+
+    # Pengelompokan Kategori Proses
+    def categorize_process(mesin):
+        m = str(mesin).upper()
+        if any(x in m for x in ['TIMBANG', 'MIXING', 'MO', 'MS', 'TR', 'TRIROLER']):
+            return 'Proses 1 (Timbang/Mixing)'
+        elif any(x in m for x in ['FILLING', 'FO', 'FM', 'PRESS']):
+            return 'Proses 2 (Filling/Press)'
+        elif any(x in m for x in ['PACKING', 'PL', 'KEMAS']):
+            return 'Proses 3 (Packing)'
+        return 'Proses Lainnya'
+
+    df_comb['KAT_PROSES'] = df_comb['NAMA_MESIN'].apply(categorize_process)
+
+    wip_rows = []
+    for batch_no, group in df_comb.groupby('NO_BATCH'):
+        subbrand = group['SUBBRAND'].iloc[0]
+        min_ts = group['TIMESTAMP'].min()
+        
+        tgl_jam_mulai = min_ts.strftime('%d/%m/%Y %H:%M') if pd.notna(min_ts) else '-'
+        
+        p1_out = group[group['KAT_PROSES'] == 'Proses 1 (Timbang/Mixing)']['OUTPUT'].sum()
+        p2_out = group[group['KAT_PROSES'] == 'Proses 2 (Filling/Press)']['OUTPUT'].sum()
+        p3_out = group[group['KAT_PROSES'] == 'Proses 3 (Packing)']['OUTPUT'].sum()
+        
+        wip_rows.append({
+            'No Batch': batch_no,
+            'Subbrand': subbrand,
+            'Mulai (Tgl & Jam)': tgl_jam_mulai,
+            'Proses 1 - Timbang/Mixing (Pcs)': f"{p1_out:,.0f}",
+            'Proses 2 - Filling/Press (Pcs)': f"{p2_out:,.0f}",
+            'Proses 3 - Packing (Pcs)': f"{p3_out:,.0f}",
+            '_raw_ts': min_ts
+        })
+
+    df_wip = pd.DataFrame(wip_rows)
+    if not df_wip.empty:
+        df_wip = df_wip.sort_values(by='_raw_ts', ascending=False).drop(columns=['_raw_ts'])
+    
+    return df_wip
+
+def get_age_mixing(df_sic, df_oee):
+    """
+    Menghitung Umur Ruahan (Age Mixing):
+    Selisih waktu antara Selesai Mixing/MO dengan Mulai Filling/Press.
+    """
+    comb = []
+    for df, col_out, col_m in [(df_sic, 'OUTPUT_PCS', 'NAMA_MESIN'), (df_oee, 'CAPAIN_PRODUKSI_PCS', 'PROSES')]:
+        if not df.empty:
+            for _, r in df.iterrows():
+                b = str(r.get('NO_BATCH', '')).strip()
+                m = str(r.get(col_m, r.get('NAMA_MESIN', ''))).upper()
+                ts = pd.to_datetime(r.get('TIMESTAMP'), errors='coerce')
+                if b and b.upper() not in ['NAN', 'NONE', ''] and pd.notna(ts):
+                    comb.append({
+                        'NO_BATCH': b,
+                        'SUBBRAND': r.get('SUBBRAND_MASTER', r.get('SUBBRAND', '-')),
+                        'MESIN': m,
+                        'TIMESTAMP': ts
+                    })
+    
+    df_c = pd.DataFrame(comb)
+    if df_c.empty:
+        return pd.DataFrame()
+
+    age_rows = []
+    for batch_no, group in df_c.groupby('NO_BATCH'):
+        subbrand = group['SUBBRAND'].iloc[0]
+        
+        mix_data = group[group['MESIN'].str.contains('MIXING|MO|MS', case=False, na=False)]
+        fill_data = group[group['MESIN'].str.contains('FILLING|FO|FM|PRESS', case=False, na=False)]
+        
+        if not mix_data.empty:
+            ts_mix_done = mix_data['TIMESTAMP'].max()
+            
+            if not fill_data.empty:
+                ts_fill_start = fill_data['TIMESTAMP'].min()
+                durasi_jam = (ts_fill_start - ts_mix_done).total_seconds() / 3600.0
+                status_aging = "Sudah Filling"
+            else:
+                now_ts = pd.Timestamp.now()
+                durasi_jam = (now_ts - ts_mix_done).total_seconds() / 3600.0
+                status_aging = "Menunggu Filling (Ruahan)"
+
+            durasi_jam = max(0.0, round(durasi_jam, 1))
+            
+            age_rows.append({
+                'No Batch': batch_no,
+                'Subbrand': subbrand,
+                'Waktu Selesai Mixing': ts_mix_done.strftime('%d/%m %H:%M'),
+                'Waktu Mulai Filling': ts_fill_start.strftime('%d/%m %H:%M') if not fill_data.empty else 'Belum Mulai',
+                'Umur Ruahan (Jam)': durasi_jam,
+                'Status': status_aging
+            })
+
+    df_age = pd.DataFrame(age_rows)
+    if not df_age.empty:
+        df_age = df_age.sort_values(by='Umur Ruahan (Jam)', ascending=False)
+        
+    return df_age
