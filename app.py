@@ -13,6 +13,8 @@ from compliance_engine import (
     send_fonnte_wa,
     build_wa_msg_operator,
     build_wa_msg_qc,
+    get_wip_operational,
+    get_age_mixing,
     is_qc_status_patuh
 )
 
@@ -134,7 +136,6 @@ def clean_data(df_qc, df_sic, df_oee):
     if not df_sic_anomali_double.empty:
         df_sic_anomali_double['KETERANGAN_ANOMALI'] = 'Double Input SIC (>30 Menit)'
     
-    # Pertahankan seluruh data SIC utuh (tanpa menghapus baris berdurasi <30 menit)
     df_sic_bersih = df_sic.copy()
 
     if 'OUTPUT_PCS' in df_sic_bersih.columns: df_sic_bersih['OUTPUT_PCS'] = pd.to_numeric(df_sic_bersih['OUTPUT_PCS'], errors='coerce').fillna(0)
@@ -210,9 +211,7 @@ try:
     df_sic_full = df_sic.copy()
     df_oee_full = df_oee.copy()
 
-    # ---------------------------------------------------------
     # FILTER GLOBAL TANGGAL
-    # ---------------------------------------------------------
     st.sidebar.header("Filter Data Global")
     
     all_dates = pd.concat([df_qc['TIMESTAMP'], df_sic['TIMESTAMP'], df_oee['TIMESTAMP']]).dropna()
@@ -250,12 +249,13 @@ try:
 
     st.info(f"📅 **Periode Data Aktif:** {periode_info} *(Bulan Berjalan Default)*")
 
-    # TAB NAVIGATION
-    tab1, tab2, tab3, tab4 = st.tabs([
+    # TAB NAVIGATION (5 TAB)
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📊 Ringkasan Eksekutif & OEE", 
         "🔍 Kualitas (QC) & Alur", 
         "⚠️ Verifikasi Data Anomali",
-        "📋 Kepatuhan & Rapport Card"
+        "📋 Kepatuhan & Rapport Card",
+        "🏭 Monitoring Operasional & WIP"
     ])
 
     # ==========================================
@@ -335,6 +335,7 @@ try:
         kondisi_fp_kpi = df_sic['NAMA_MESIN'].astype(str).str.contains('Filling|Press', case=False, na=False)
         total_output_fp = pd.to_numeric(df_sic[kondisi_fp_kpi]['OUTPUT_PCS'], errors='coerce').fillna(0).sum()
 
+        # METRIK KPI TOP CARDS
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         col1.metric("Total Output (Filling & Press)", f"{total_output_fp:,.0f} Pcs")
         col2.metric("QTY Reject Kemasan (OEE)", f"{total_reject_kemas_oee:,.0f} Pcs")
@@ -345,6 +346,7 @@ try:
 
         st.markdown("---")
         
+        # RINGKASAN PER SUBBRAND & KINERJA MEDIAN MESIN
         col_chart1, col_chart2 = st.columns(2)
         with col_chart1:
             st.markdown("**10 Subbrand dengan Produksi Tertinggi (Pcs)**")
@@ -375,118 +377,165 @@ try:
                 st.info("Data tidak tersedia.")
 
         st.markdown("---")
-        st.markdown("### 📊 Analisis Komponen OEE per Nomor/Line Mesin")
-        
+
+        # ---------------------------------------------------------
+        # ANALISIS DETAIL HARIAN, MESIN & LINE
+        # ---------------------------------------------------------
         list_mesin_tren = sorted(df_sic_fp['NAMA_MESIN'].unique().tolist())
-        col_fil1, col_fil2 = st.columns([2, 3])
-        with col_fil1:
-            pilih_mesin_tren = st.selectbox("Pilih Jenis Mesin untuk Analisis Detail Line:", list_mesin_tren)
-        with col_fil2:
-            mode_tampilan = st.radio("Mode Tampilan Grafik Komponen OEE:", ["Agregat Total (Bar Chart)", "Tren Harian (Line Chart)"], horizontal=True)
-        
-        df_oee_line_selected = df_oee_perf_fp[df_oee_perf_fp['NAMA_MESIN_KEY'].str.upper() == pilih_mesin_tren.upper()].copy()
-        df_oee_line_selected['LINE_DISPLAY'] = df_oee_line_selected['NO_MESIN_LINE_KEY'].apply(format_line_number)
+        if list_mesin_tren:
+            pilih_mesin_tren = st.selectbox("Pilih Jenis Mesin untuk Analisis Detail Line:", list_mesin_tren, key="sb_mesin_tren_tab1")
 
-        if mode_tampilan == "Agregat Total (Bar Chart)":
-            oee_by_line = []
-            for line_name, group in df_oee_line_selected.groupby('LINE_DISPLAY'):
-                c_pcs = group['CAPAIN_PRODUKSI_PCS'].sum()
-                rej_pcs = group['REJECT_PCS'].sum()
-                rep_pcs = group['REPROSES_PCS'].sum()
-                den_q = c_pcs + rej_pcs + rep_pcs
-                q_line = (c_pcs / den_q * 100) if den_q > 0 else 100.0
+            # 1. TREN OUTPUT PER CYCLE & RATA-RATA OUTPUT PER JAM
+            st.markdown("### 📊 Tren Output per Cycle & Rata-Rata Output per Jam")
+            df_sic_selected = df_sic_fp[df_sic_fp['NAMA_MESIN'].str.upper() == pilih_mesin_tren.upper()].copy()
+            df_sic_selected['LINE_DISPLAY'] = df_sic_selected['NO_MESIN_LINE'].apply(format_line_number) if 'NO_MESIN_LINE' in df_sic_selected.columns else "Line Unknown"
 
-                valid_perf = group[group['GROSS_CAPAIAN_PER_JAM'] > 0]
-                p_line = (valid_perf['GROSS_CAPAIAN_PER_JAM'] / valid_perf['TARGET_SUBBRAND_JAM']).clip(upper=1.0).mean() * 100 if not valid_perf.empty else 85.0
-                a_line = 100.0
-                oee_line = (q_line / 100.0) * (p_line / 100.0) * (a_line / 100.0) * 100.0
+            col_t1, col_t2 = st.columns(2)
 
-                oee_by_line.append({'Nomor Mesin': line_name, 'OEE (%)': round(oee_line, 2), 'Performance (%)': round(p_line, 2), 'Quality (%)': round(q_line, 2), 'Availability (%)': round(a_line, 2)})
+            with col_t1:
+                st.markdown(f"**1. Tren Output per Cycle ({pilih_mesin_tren})**")
+                if not df_sic_selected.empty:
+                    df_sic_selected_sorted = df_sic_selected.sort_values(by='TIMESTAMP')
+                    fig_cycle = px.line(
+                        df_sic_selected_sorted,
+                        x='TIMESTAMP',
+                        y='OUTPUT_PCS',
+                        color='LINE_DISPLAY',
+                        markers=True,
+                        labels={'TIMESTAMP': 'Waktu / Timestamp', 'OUTPUT_PCS': 'Output (Pcs)', 'LINE_DISPLAY': 'Nomor Line'}
+                    )
+                    fig_cycle.update_traces(hovertemplate='<b>%{data.name}</b><br>Waktu: %{x}<br>Output: %{y:,.0f} Pcs<extra></extra>')
+                    fig_cycle.update_layout(height=380, legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5))
+                    st.plotly_chart(fig_cycle, use_container_width=True)
+                else:
+                    st.info("Tidak ada data cycle untuk jenis mesin ini.")
 
-            df_line_kpi = pd.DataFrame(oee_by_line)
-            if not df_line_kpi.empty:
-                col_oee1, col_oee2 = st.columns(2)
-                with col_oee1:
-                    st.markdown(f"**Nilai OEE Total ({pilih_mesin_tren})**")
-                    fig_oee = px.bar(df_line_kpi, x='Nomor Mesin', y='OEE (%)', text='OEE (%)', color='OEE (%)', color_continuous_scale='Teal')
-                    fig_oee.update_traces(texttemplate='%{text:.2f}%', textposition='outside')
-                    fig_oee.update_layout(height=350, yaxis_range=[0, 115])
-                    st.plotly_chart(fig_oee, use_container_width=True)
+            with col_t2:
+                st.markdown(f"**2. Rata-Rata Output per Jam per Line ({pilih_mesin_tren})**")
+                if not df_sic_selected.empty:
+                    avg_hourly = df_sic_selected.groupby('LINE_DISPLAY')['OUTPUT_PCS'].mean().round(0).reset_index()
+                    avg_hourly = avg_hourly.sort_values(by='LINE_DISPLAY')
+                    
+                    fig_avg = px.bar(
+                        avg_hourly,
+                        x='LINE_DISPLAY',
+                        y='OUTPUT_PCS',
+                        text='OUTPUT_PCS',
+                        color='OUTPUT_PCS',
+                        color_continuous_scale='Teal',
+                        labels={'LINE_DISPLAY': 'Nomor Line', 'OUTPUT_PCS': 'Rata-Rata Output (Pcs/Jam)'}
+                    )
+                    fig_avg.update_traces(texttemplate='%{text:,.0f} Pcs', textposition='outside')
+                    fig_avg.update_layout(height=380, showlegend=False, yaxis_range=[0, max(avg_hourly['OUTPUT_PCS'].max() * 1.25, 100)])
+                    st.plotly_chart(fig_avg, use_container_width=True)
+                else:
+                    st.info("Tidak ada data rata-rata output untuk jenis mesin ini.")
 
-                with col_oee2:
-                    st.markdown(f"**Performance Rate Total ({pilih_mesin_tren})**")
-                    fig_perf = px.bar(df_line_kpi, x='Nomor Mesin', y='Performance (%)', text='Performance (%)', color='Performance (%)', color_continuous_scale='Blues')
-                    fig_perf.update_traces(texttemplate='%{text:.2f}%', textposition='outside')
-                    fig_perf.update_layout(height=350, yaxis_range=[0, 115])
-                    st.plotly_chart(fig_perf, use_container_width=True)
+            st.markdown("---")
 
-                col_oee3, col_oee4 = st.columns(2)
-                with col_oee3:
-                    st.markdown(f"**Quality Rate Total ({pilih_mesin_tren})**")
-                    fig_qual = px.bar(df_line_kpi, x='Nomor Mesin', y='Quality (%)', text='Quality (%)', color='Quality (%)', color_continuous_scale='Greens')
-                    fig_qual.update_traces(texttemplate='%{text:.2f}%', textposition='outside')
-                    fig_qual.update_layout(height=350, yaxis_range=[0, 115])
-                    st.plotly_chart(fig_qual, use_container_width=True)
+            # 2. TABEL DETAIL ANALISIS OEE (DARI KODE REFERENSI ANDA)
+            st.markdown(f"**📋 Tabel Detail Analisis OEE ({pilih_mesin_tren})**")
+            df_oee_line_selected = df_oee_perf_fp[df_oee_perf_fp['NAMA_MESIN_KEY'].str.upper() == pilih_mesin_tren.upper()].copy()
+            df_oee_line_selected['LINE_DISPLAY'] = df_oee_line_selected['NO_MESIN_LINE_KEY'].apply(format_line_number)
 
-                with col_oee4:
-                    st.markdown(f"**Availability Rate Total ({pilih_mesin_tren})**")
-                    fig_avail = px.bar(df_line_kpi, x='Nomor Mesin', y='Availability (%)', text='Availability (%)', color='Availability (%)', color_continuous_scale='Purples')
-                    fig_avail.update_traces(texttemplate='%{text:.0f}%', textposition='outside')
-                    fig_avail.update_layout(height=350, yaxis_range=[0, 115])
-                    st.plotly_chart(fig_avail, use_container_width=True)
+            if not df_oee_line_selected.empty:
+                df_table_oee = df_oee_line_selected.copy()
+                df_table_oee['Tanggal Produksi'] = df_table_oee['TIMESTAMP'].dt.strftime('%Y-%m-%d')
+                df_table_oee['Subbrand'] = df_table_oee.apply(get_real_subbrand, axis=1)
+
+                if 'MESIN_FULL' in df_table_oee.columns and df_table_oee['MESIN_FULL'].notna().any():
+                    df_table_oee['Mesin_Full'] = df_table_oee['MESIN_FULL']
+                else:
+                    df_table_oee['Mesin_Full'] = df_table_oee['NAMA_MESIN_KEY'] + " - " + df_table_oee['LINE_DISPLAY']
+
+                df_table_oee['Capaian Produksi Gross'] = df_table_oee['GROSS_OUTPUT_PCS']
+                df_table_oee['Total Reject'] = df_table_oee['REJECT_PCS']
+                df_table_oee['Total Reproses'] = df_table_oee['REPROSES_PCS']
+                df_table_oee['Durasi'] = pd.to_numeric(df_table_oee['Durasi Bersih'], errors='coerce').fillna(0)
+
+                df_table_oee['Capaian (Gross) / Jam'] = pd.to_numeric(df_table_oee['GROSS_CAPAIAN_PER_JAM'], errors='coerce').fillna(0)
+                df_table_oee['Target Kapasitas / Jam'] = pd.to_numeric(df_table_oee['TARGET_SUBBRAND_JAM'], errors='coerce').fillna(0)
+
+                df_table_oee['Availability'] = 100.0
+                df_table_oee['Quality'] = df_table_oee.apply(lambda r: (r['CAPAIN_PRODUKSI_PCS'] / r['GROSS_OUTPUT_PCS'] * 100) if r['GROSS_OUTPUT_PCS'] > 0 else 100.0, axis=1)
+
+                df_table_oee['Raw_Performance'] = df_table_oee.apply(lambda r: (r['GROSS_CAPAIAN_PER_JAM'] / r['TARGET_SUBBRAND_JAM'] * 100) if r['TARGET_SUBBRAND_JAM'] > 0 else 85.0, axis=1)
+                df_table_oee['Performance'] = df_table_oee['Raw_Performance'].clip(upper=100.0)
+                df_table_oee['Status Target'] = df_table_oee['Raw_Performance'].apply(lambda x: f"⚡ Over Target ({x:.1f}%)" if x > 100.0 else "✅ Normal")
+
+                df_table_oee['OEE'] = (df_table_oee['Availability'] / 100) * (df_table_oee['Performance'] / 100) * (df_table_oee['Quality'] / 100) * 100
+
+                kolom_tampil = [
+                    'Tanggal Produksi', 'NO_BATCH', 'Subbrand', 'Mesin_Full',
+                    'Capaian Produksi Gross', 'Total Reject', 'Total Reproses',
+                    'Durasi', 'Capaian (Gross) / Jam', 'Target Kapasitas / Jam',
+                    'Availability', 'Performance', 'Quality', 'OEE', 'Status Target'
+                ]
+
+                df_table_display = df_table_oee[kolom_tampil].rename(columns={'NO_BATCH': 'No Batch'}).sort_values(by='Tanggal Produksi', ascending=False)
+
+                st.dataframe(
+                    df_table_display.style.format({
+                        'Capaian Produksi Gross': '{:,.0f}',
+                        'Total Reject': '{:,.0f}',
+                        'Total Reproses': '{:,.0f}',
+                        'Durasi': '{:,.0f}',
+                        'Capaian (Gross) / Jam': '{:,.0f}',
+                        'Target Kapasitas / Jam': '{:,.0f}',
+                        'Availability': '{:.2f}%',
+                        'Performance': '{:.2f}%',
+                        'Quality': '{:.2f}%',
+                        'OEE': '{:.2f}%'
+                    }),
+                    use_container_width=True
+                )
             else:
-                st.info("Data komponen OEE per line belum tersedia.")
-        else:
-            df_oee_line_selected['TANGGAL'] = df_oee_line_selected['TIMESTAMP'].dt.date
-            daily_oee_list = []
-            for (tgl, line_name), group in df_oee_line_selected.groupby(['TANGGAL', 'LINE_DISPLAY']):
-                c_pcs = group['CAPAIN_PRODUKSI_PCS'].sum()
-                rej_pcs = group['REJECT_PCS'].sum()
-                rep_pcs = group['REPROSES_PCS'].sum()
-                den_q = c_pcs + rej_pcs + rep_pcs
-                q_line = (c_pcs / den_q * 100) if den_q > 0 else 100.0
+                st.info("Tidak ada data detail OEE untuk mesin yang dipilih.")
 
-                valid_perf = group[group['GROSS_CAPAIAN_PER_JAM'] > 0]
-                p_line = (valid_perf['GROSS_CAPAIAN_PER_JAM'] / valid_perf['TARGET_SUBBRAND_JAM']).clip(upper=1.0).mean() * 100 if not valid_perf.empty else 85.0
-                a_line = 100.0
-                oee_line = (q_line / 100.0) * (p_line / 100.0) * (a_line / 100.0) * 100.0
+            # 3. ANALISIS TREN & STABILITAS OUTPUT ANTAK CYCLE (DARI KODE REFERENSI ANDA)
+            st.markdown("---")
+            st.markdown("### 📈 Analisis Tren & Stabilitas Output antar Cycle")
 
-                daily_oee_list.append({'Tanggal': tgl, 'Nomor Mesin': line_name, 'OEE (%)': round(oee_line, 2), 'Performance (%)': round(p_line, 2), 'Quality (%)': round(q_line, 2), 'Availability (%)': round(a_line, 2)})
-
-            df_daily_kpi = pd.DataFrame(daily_oee_list)
-            if not df_daily_kpi.empty:
-                df_daily_kpi = df_daily_kpi.sort_values(by=['Tanggal', 'Nomor Mesin'])
-                col_oee1, col_oee2 = st.columns(2)
-                with col_oee1:
-                    st.markdown(f"**Tren Harian Nilai OEE ({pilih_mesin_tren})**")
-                    fig_oee = px.line(df_daily_kpi, x='Tanggal', y='OEE (%)', color='Nomor Mesin', markers=True)
-                    fig_oee.update_traces(hovertemplate='<b>%{data.name}</b><br>Tanggal: %{x}<br>OEE: %{y:.2f}%<extra></extra>')
-                    fig_oee.update_layout(height=350, yaxis_range=[0, 110], legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5))
-                    st.plotly_chart(fig_oee, use_container_width=True)
-
-                with col_oee2:
-                    st.markdown(f"**Tren Harian Performance Rate ({pilih_mesin_tren})**")
-                    fig_perf = px.line(df_daily_kpi, x='Tanggal', y='Performance (%)', color='Nomor Mesin', markers=True)
-                    fig_perf.update_traces(hovertemplate='<b>%{data.name}</b><br>Tanggal: %{x}<br>Performance: %{y:.2f}%<extra></extra>')
-                    fig_perf.update_layout(height=350, yaxis_range=[0, 110], legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5))
-                    st.plotly_chart(fig_perf, use_container_width=True)
-
-                col_oee3, col_oee4 = st.columns(2)
-                with col_oee3:
-                    st.markdown(f"**Tren Harian Quality Rate ({pilih_mesin_tren})**")
-                    fig_qual = px.line(df_daily_kpi, x='Tanggal', y='Quality (%)', color='Nomor Mesin', markers=True)
-                    fig_qual.update_traces(hovertemplate='<b>%{data.name}</b><br>Tanggal: %{x}<br>Quality: %{y:.2f}%<extra></extra>')
-                    fig_qual.update_layout(height=350, yaxis_range=[0, 110], legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5))
-                    st.plotly_chart(fig_qual, use_container_width=True)
-
-                with col_oee4:
-                    st.markdown(f"**Tren Harian Availability Rate ({pilih_mesin_tren})**")
-                    fig_avail = px.line(df_daily_kpi, x='Tanggal', y='Availability (%)', color='Nomor Mesin', markers=True)
-                    fig_avail.update_traces(hovertemplate='<b>%{data.name}</b><br>Tanggal: %{x}<br>Availability: %{y:.0f}%<extra></extra>')
-                    fig_avail.update_layout(height=350, yaxis_range=[0, 110], legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5))
-                    st.plotly_chart(fig_avail, use_container_width=True)
+            df_sic_tren = df_sic_fp[df_sic_fp['NAMA_MESIN'] == pilih_mesin_tren].copy()
+            if 'STATUS_ALUR' in df_sic_tren.columns:
+                kondisi_istirahat_sanitasi = df_sic_tren['STATUS_ALUR'].astype(str).str.contains('ISTIRAHAT|SANITASI|BREAK|STOP', case=False, na=False)
+                df_sic_produktif = df_sic_tren[(df_sic_tren['OUTPUT_PCS'] > 0) & (~kondisi_istirahat_sanitasi)].copy()
             else:
-                st.info("Data harian komponen OEE per line belum tersedia.")
+                df_sic_produktif = df_sic_tren[df_sic_tren['OUTPUT_PCS'] > 0].copy()
+
+            df_sic_produktif['NO_MESIN_LINE'] = df_sic_produktif['NO_MESIN_LINE'].apply(format_line_number) if 'NO_MESIN_LINE' in df_sic_produktif.columns else "Line Unknown"
+
+            df_sic_produktif = df_sic_produktif.sort_values(by=['NO_BATCH', 'NO_MESIN_LINE', 'TIMESTAMP'])
+            df_sic_produktif['CYCLE_AKTIF'] = df_sic_produktif.groupby(['NO_BATCH', 'NO_MESIN_LINE']).cumcount() + 1
+            df_sic_produktif['DIFF_OUTPUT'] = df_sic_produktif.groupby(['NO_BATCH', 'NO_MESIN_LINE'])['OUTPUT_PCS'].diff().fillna(0)
+
+            col_diff1, col_diff2 = st.columns(2)
+            with col_diff1:
+                st.markdown(f"**Tren Rata-rata Output ({pilih_mesin_tren})**")
+                tren_cycle = df_sic_produktif[df_sic_produktif['CYCLE_AKTIF'] <= 10].groupby(['NO_MESIN_LINE', 'CYCLE_AKTIF'])['OUTPUT_PCS'].mean().round(0).reset_index()
+                if not tren_cycle.empty:
+                    fig_tren = px.line(tren_cycle, x='CYCLE_AKTIF', y='OUTPUT_PCS', color='NO_MESIN_LINE', markers=True,
+                                       labels={'OUTPUT_PCS': 'Rata-rata Output (Pcs)', 'CYCLE_AKTIF': 'Siklus Aktif ke-', 'NO_MESIN_LINE': 'Nomor Mesin'})
+                    fig_tren.update_traces(hovertemplate='<b>%{data.name}</b><br>Siklus ke-%{x}<br>Output: %{y:,.0f} Pcs<extra></extra>')
+                    fig_tren.update_xaxes(dtick=1) 
+                    fig_tren.update_layout(legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5))
+                    st.plotly_chart(fig_tren, use_container_width=True)
+                else:
+                    st.info("Data trend belum tersedia.")
+
+            with col_diff2:
+                st.markdown(f"**Rata-rata Penurunan/Penambahan Output ({pilih_mesin_tren})**")
+                st.caption("*Melihat mesin mana yang paling stabil antar siklus.*")
+                df_diff_valid = df_sic_produktif[df_sic_produktif['CYCLE_AKTIF'] > 1]
+                diff_avg = df_diff_valid.groupby('NO_MESIN_LINE')['DIFF_OUTPUT'].mean().round(0).reset_index()
+                if not diff_avg.empty:
+                    fig_diff = px.bar(diff_avg, x='NO_MESIN_LINE', y='DIFF_OUTPUT',
+                                      labels={'DIFF_OUTPUT': 'Selisih Output (Pcs)', 'NO_MESIN_LINE': 'Nomor Mesin'},
+                                      color='DIFF_OUTPUT', color_continuous_scale='RdBu', text='DIFF_OUTPUT')
+                    fig_diff.add_hline(y=0, line_dash="dash", line_color="black")
+                    st.plotly_chart(fig_diff, use_container_width=True)
+                else:
+                    st.info("Data differensial belum cukup (butuh minimal 2 siklus aktif).")
 
     # ==========================================
     # TAB 2: KUALITAS (QC) & ALUR
@@ -503,12 +552,11 @@ try:
 
         q_col1, q_col2, q_col3, q_col4 = st.columns(4)
         q_col1.metric("Total Reject (QC)", f"{tot_reject:,.0f} Pcs")
-        q_col2.metric("Total Reproses (QC)", f"{tot_reproses:,.0f} Pcs")
+        q_col2.metric("Total Repproses (QC)", f"{tot_reproses:,.0f} Pcs")
         q_col3.metric("Total Defect (QC)", f"{(tot_reject + tot_reproses):,.0f} Pcs")
         q_col4.metric("Overall Quality Rate", f"{overall_quality:.2f} %")
 
         st.markdown("---")
-
         st.markdown("### 📈 Tren Bulanan Reject Rate & Reproses Rate (Keseluruhan Periode Data)")
         
         df_qc_temp_full = df_qc_full.copy()
@@ -579,10 +627,8 @@ try:
                 st.info("Data tren bulanan belum tersedia.")
 
         st.markdown("---")
-
         st.markdown(f"### 📊 Perbandingan Defect Rate per Line Mesin ({pilih_mesin_qc_bulanan})")
-        st.caption("Menampilkan persentase Reject Rate (%) dan Reproses Rate (%) untuk setiap line mesin pada periode aktif.")
-
+        
         df_qc_line_data = df_oee_perf[df_oee_perf['NAMA_MESIN_KEY'].str.upper() == pilih_mesin_qc_bulanan.upper()].copy()
 
         if not df_qc_line_data.empty:
@@ -597,7 +643,6 @@ try:
             summary_line_qc['GROSS_OUTPUT'] = summary_line_qc['CAPAIN_PRODUKSI_PCS'] + summary_line_qc['REJECT_PCS'] + summary_line_qc['REPROSES_PCS']
             summary_line_qc['Reject Rate (%)'] = summary_line_qc.apply(lambda r: (r['REJECT_PCS'] / r['GROSS_OUTPUT'] * 100) if r['GROSS_OUTPUT'] > 0 else 0.0, axis=1).round(2)
             summary_line_qc['Reproses Rate (%)'] = summary_line_qc.apply(lambda r: (r['REPROSES_PCS'] / r['GROSS_OUTPUT'] * 100) if r['GROSS_OUTPUT'] > 0 else 0.0, axis=1).round(2)
-
             summary_line_qc = summary_line_qc.sort_values(by='LINE_DISPLAY')
 
             col_c1, col_c2 = st.columns(2)
@@ -606,8 +651,7 @@ try:
                 if not summary_line_qc.empty:
                     fig_bar_rej = px.bar(
                         summary_line_qc, x='LINE_DISPLAY', y='Reject Rate (%)',
-                        text='Reject Rate (%)', color='Reject Rate (%)',
-                        color_continuous_scale='Reds',
+                        text='Reject Rate (%)', color='Reject Rate (%)', color_continuous_scale='Reds',
                         labels={'LINE_DISPLAY': 'Nomor Mesin', 'Reject Rate (%)': 'Reject Rate (%)'}
                     )
                     max_rej = summary_line_qc['Reject Rate (%)'].max()
@@ -622,8 +666,7 @@ try:
                 if not summary_line_qc.empty:
                     fig_bar_rep = px.bar(
                         summary_line_qc, x='LINE_DISPLAY', y='Reproses Rate (%)',
-                        text='Reproses Rate (%)', color='Reproses Rate (%)',
-                        color_continuous_scale='YlOrBr',
+                        text='Reproses Rate (%)', color='Reproses Rate (%)', color_continuous_scale='YlOrBr',
                         labels={'LINE_DISPLAY': 'Nomor Mesin', 'Reproses Rate (%)': 'Reproses Rate (%)'}
                     )
                     max_rep = summary_line_qc['Reproses Rate (%)'].max()
@@ -632,8 +675,6 @@ try:
                     st.plotly_chart(fig_bar_rep, use_container_width=True)
                 else:
                     st.info("Data tidak tersedia.")
-        else:
-            st.info("Tidak ada data kualitas per line untuk jenis mesin yang dipilih pada rentang tanggal ini.")
 
     # ==========================================
     # TAB 3: VERIFIKASI ANOMALI
@@ -657,7 +698,6 @@ try:
         fonnte_token = st.secrets.get("FONNTE_TOKEN", "T3rQq4tCo8hEAC9ovYpa")
         wa_target_no = st.secrets.get("WA_TARGET", "6281283430510")
         
-        # 1. FILTER RENTANG WAKTU AUDIT
         col_m1, col_m2 = st.columns([2, 3])
         with col_m1:
             mode_audit = st.radio("Pilih Opsi Tampilan Audit:", ["Harian (Specific Date)", "Bulanan (Full Month)"], horizontal=True)
@@ -671,7 +711,6 @@ try:
                 end_audit_str = audit_date.strftime("%Y-%m-%d")
                 periode_judul = f"Tanggal {audit_date.strftime('%d %B %Y')}"
                 
-                # Penarikan Tren 7 Hari Terakhir (H-6 s.d Tanggal Audit)
                 start_trend_str = (audit_date - timedelta(days=6)).strftime("%Y-%m-%d")
                 end_trend_str = end_audit_str
                 judul_trend = f"Tren Kepatuhan 7 Hari Terakhir ({(audit_date - timedelta(days=6)).strftime('%d %b')} s.d. {audit_date.strftime('%d %b %Y')})"
@@ -688,7 +727,6 @@ try:
                 end_audit_str = f"{pilih_tahun:04d}-{pilih_bulan:02d}-{last_day:02d}"
                 periode_judul = f"Bulan {datetime(pilih_tahun, pilih_bulan, 1).strftime('%B %Y')}"
                 
-                # Penarikan Tren 1 Bulan Penuh
                 start_trend_str = start_audit_str
                 end_trend_str = end_audit_str
                 judul_trend = f"Tren Kepatuhan Harian ({periode_judul})"
@@ -696,15 +734,12 @@ try:
         with st.spinner("Menganalisis Kepatuhan 3-Form (OEE, SIC, QC)..."):
             compliance_res = get_rapport_cards_range(df_oee_full, df_sic_full, df_qc_full, start_audit_str, end_audit_str)
 
-        # 2. METRIKS UTAMA COMPLIANCE SUMMARY
         c1, c2, c3 = st.columns(3)
         c1.metric("Kepatuhan Dept OEE - SIC", compliance_res['skorDeptOEESIC'])
         c2.metric("Kepatuhan Dept QC", compliance_res['skorDeptQC'])
         c3.metric("Akurasi Output (OEE vs SIC)", compliance_res['skorAkurasi'])
 
         st.markdown("---")
-
-        # 3. GRAFIK TREN COMPLIANCE HARIAN TIM PRODUKSI VS QC
         st.markdown(f"### 📈 {judul_trend}")
         
         with st.spinner("Memuat tren kepatuhan..."):
@@ -719,33 +754,19 @@ try:
             ).dropna()
 
             fig_trend = px.line(
-                df_trend_melted, 
-                x='Tanggal', 
-                y='Compliance Rate (%)', 
-                color='Tim',
-                markers=True,
-                color_discrete_map={
-                    'Tim Produksi (OEE & SIC)': '#008080',  # Teal
-                    'Tim QC (Inspector)': '#2B5B84'         # Blue
-                }
+                df_trend_melted, x='Tanggal', y='Compliance Rate (%)', color='Tim', markers=True,
+                color_discrete_map={'Tim Produksi (OEE & SIC)': '#008080', 'Tim QC (Inspector)': '#2B5B84'}
             )
             fig_trend.update_traces(hovertemplate='<b>%{data.name}</b><br>Tanggal: %{x}<br>Compliance Rate: %{y:.1f}%<extra></extra>')
-            fig_trend.update_layout(
-                height=350, 
-                yaxis_range=[0, 110],
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-            )
+            fig_trend.update_layout(height=350, yaxis_range=[0, 110], legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
             st.plotly_chart(fig_trend, use_container_width=True)
         else:
             st.info("Tidak ada aktivitas data produksi/QC pada rentang waktu ini.")
 
         st.markdown("---")
-
-        # 4. VISUALISASI GRAFIK COMPLIANCE RATE USER INDIVIDUAL (DIPISAH PRODUKSI VS QC)
         st.markdown(f"### 📊 Perbandingan Compliance Rate User ({periode_judul})")
         
         col_g1, col_g2 = st.columns(2)
-        
         with col_g1:
             st.markdown("**1. Tim Operator Produksi (OEE & SIC)**")
             df_prod_comp = compliance_res['dfProdCompliance']
@@ -753,10 +774,8 @@ try:
                 df_prod_comp = df_prod_comp.sort_values(by='Compliance Rate (%)', ascending=True)
                 fig_prod_comp = px.bar(
                     df_prod_comp, x='Compliance Rate (%)', y='Operator', orientation='h',
-                    text='Compliance Rate (%)', color='Compliance Rate (%)',
-                    color_continuous_scale='Teal',
-                    labels={'Compliance Rate (%)': 'Compliance Rate (%)', 'Operator': 'Nama Operator'},
-                    hover_data=['Total Batch']
+                    text='Compliance Rate (%)', color='Compliance Rate (%)', color_continuous_scale='Teal',
+                    labels={'Compliance Rate (%)': 'Compliance Rate (%)', 'Operator': 'Nama Operator'}, hover_data=['Total Batch']
                 )
                 fig_prod_comp.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
                 fig_prod_comp.update_layout(height=380, xaxis_range=[0, 115], showlegend=False)
@@ -771,10 +790,8 @@ try:
                 df_qc_comp = df_qc_comp.sort_values(by='Compliance Rate (%)', ascending=True)
                 fig_qc_comp = px.bar(
                     df_qc_comp, x='Compliance Rate (%)', y='Inspector QC', orientation='h',
-                    text='Compliance Rate (%)', color='Compliance Rate (%)',
-                    color_continuous_scale='Blues',
-                    labels={'Compliance Rate (%)': 'Compliance Rate (%)', 'Inspector QC': 'Nama Inspector'},
-                    hover_data=['Total Batch']
+                    text='Compliance Rate (%)', color='Compliance Rate (%)', color_continuous_scale='Blues',
+                    labels={'Compliance Rate (%)': 'Compliance Rate (%)', 'Inspector QC': 'Nama Inspector'}, hover_data=['Total Batch']
                 )
                 fig_qc_comp.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
                 fig_qc_comp.update_layout(height=380, xaxis_range=[0, 115], showlegend=False)
@@ -783,15 +800,12 @@ try:
                 st.info(f"Tidak ada data aktivitas inspector QC pada {periode_judul}.")
 
         st.markdown("---")
-
-        # 5. DETAIL BREAKDOWN & WHATSAPP BLAST
         st.markdown(f"### 👤 Detail Rapport Card Individual ({periode_judul})")
         
         op_cards = compliance_res['operatorCards']
         if op_cards:
             op_names = [card['operator'] for card in op_cards]
             selected_op = st.selectbox("🔍 Pilih Nama User untuk Detail Catatan:", op_names)
-            
             card_user = next((c for c in op_cards if c['operator'] == selected_op), None)
             
             if card_user:
@@ -822,14 +836,11 @@ try:
             st.success(f"🎉 Seluruh operator 100% COMPLIANT pada {periode_judul}! Tidak ditemukan kelalaian input, late log, maupun selisih output.")
 
         st.markdown("---")
-        
-        # 6. MISSED CHECKLIST QC
         st.markdown(f"### 🚨 Missed Checklist QC (Batch Belum Diisi Form QC)")
         qc_pending = compliance_res['qcPendingList']
         
         if qc_pending:
             st.dataframe(pd.DataFrame(qc_pending), use_container_width=True)
-            
             if st.button("📲 Send Alert Missed QC List via WhatsApp (Fonnte)"):
                 msg_qc = build_wa_msg_qc(qc_pending, periode_judul)
                 res_qc = send_fonnte_wa(fonnte_token, wa_target_no, msg_qc)
@@ -839,6 +850,104 @@ try:
                     st.error(f"Gagal mengirim WA: {res_qc.get('reason', 'Unknown Error')}")
         else:
             st.success(f"✅ Seluruh form QC telah terisi lengkap untuk {periode_judul}.")
+
+    # ==========================================
+    # TAB 5: MONITORING OPERASIONAL & WIP
+    # ==========================================
+    with tab5:
+        st.subheader("🏭 Monitoring Operasional Real-Time, WIP & Age Mixing")
+        
+        st.markdown("### 🟢 Real-Time Machine Status")
+        
+        df_all_machine_logs = pd.concat([
+            df_oee[['NAMA_MESIN', 'TIMESTAMP', 'NO_BATCH', 'CAPAIN_PRODUKSI_PCS']].rename(columns={'CAPAIN_PRODUKSI_PCS': 'OUTPUT'}),
+            df_sic[['NAMA_MESIN', 'TIMESTAMP', 'NO_BATCH', 'OUTPUT_PCS']].rename(columns={'OUTPUT_PCS': 'OUTPUT'})
+        ]).dropna(subset=['NAMA_MESIN', 'TIMESTAMP'])
+        
+        if not df_all_machine_logs.empty:
+            df_all_machine_logs['TIMESTAMP'] = pd.to_datetime(df_all_machine_logs['TIMESTAMP'], errors='coerce')
+            latest_machines = df_all_machine_logs.sort_values('TIMESTAMP').groupby('NAMA_MESIN').last().reset_index()
+            
+            now = max_date if pd.notna(max_date) else pd.Timestamp.now()
+            
+            def get_machine_status(ts):
+                if pd.isna(ts): return 'Idle'
+                diff_hours = (now - ts).total_seconds() / 3600.0
+                return 'On Running' if diff_hours <= 2 else 'Idle'
+
+            latest_machines['STATUS'] = latest_machines['TIMESTAMP'].apply(get_machine_status)
+            
+            cnt_running = (latest_machines['STATUS'] == 'On Running').sum()
+            cnt_idle = (latest_machines['STATUS'] == 'Idle').sum()
+            cnt_total = len(latest_machines)
+
+            m_col1, m_col2, m_col3 = st.columns(3)
+            m_col1.metric("🟢 Mesin On Running", f"{cnt_running} Mesin")
+            m_col2.metric("🔘 Mesin Idle", f"{cnt_idle} Mesin")
+            m_col3.metric("🏭 Total Mesin Terdaftar", f"{cnt_total} Mesin")
+
+            st.markdown("---")
+            kat_options = ["Semua Mesin", "Filling", "Press", "Mixing / Timbang", "Packing"]
+            pilih_kat_mesin = st.selectbox("🔍 Filter Tampilan Mesin per Kategori:", kat_options)
+
+            df_filtered_m = latest_machines.copy()
+            if pilih_kat_mesin != "Semua Mesin":
+                df_filtered_m = df_filtered_m[df_filtered_m['NAMA_MESIN'].str.contains(pilih_kat_mesin, case=False, na=False)]
+
+            with st.expander(f"📌 Tampilkan Kartu Status Mesin ({len(df_filtered_m)} Mesin)", expanded=True):
+                cols_per_row = 4
+                machine_list = df_filtered_m.to_dict('records')
+                
+                for i in range(0, len(machine_list), cols_per_row):
+                    cols = st.columns(cols_per_row)
+                    for j, m_data in enumerate(machine_list[i:i+cols_per_row]):
+                        with cols[j]:
+                            is_running = m_data['STATUS'] == 'On Running'
+                            card_bg = "#1e4620" if is_running else "#3a3a3a"
+                            border_color = "#2e7d32" if is_running else "#616161"
+                            status_icon = "🟢 RUNNING" if is_running else "🔘 IDLE"
+                            
+                            st.markdown(
+                                f"""
+                                <div style="background-color: {card_bg}; padding: 12px; border-radius: 8px; border: 1px solid {border_color}; margin-bottom: 10px;">
+                                    <h5 style="margin:0; color: white;">{m_data['NAMA_MESIN']}</h5>
+                                    <p style="margin:2px 0; font-size: 12px; color: #ddd;"><b>Status:</b> {status_icon}</p>
+                                    <p style="margin:2px 0; font-size: 11px; color: #bbb;"><b>Batch:</b> {m_data['NO_BATCH'] or '-'}</p>
+                                    <p style="margin:2px 0; font-size: 11px; color: #bbb;"><b>Output:</b> {m_data['OUTPUT']:,.0f} Pcs</p>
+                                </div>
+                                """,
+                                unsafe_allow_html=True
+                            )
+        else:
+            st.info("Tidak ada data transaksi mesin yang terdeteksi.")
+
+        st.markdown("---")
+        col_wip1, col_wip2 = st.columns([3, 2])
+
+        with col_wip1:
+            st.markdown("### 📋 Tabel WIP Operasional (Tracking Batch)")
+            df_wip_res = get_wip_operational(df_sic, df_oee)
+            if not df_wip_res.empty:
+                st.dataframe(df_wip_res, use_container_width=True, height=400)
+            else:
+                st.info("Data WIP Operasional tidak ditemukan pada periode ini.")
+
+        with col_wip2:
+            st.markdown("### ⏱️ Age Mixing (Aging Ruahan Ke Filling)")
+            df_age_res = get_age_mixing(df_sic, df_oee)
+            if not df_age_res.empty:
+                def highlight_aging(val):
+                    if isinstance(val, (int, float)) and val > 24.0:
+                        return 'background-color: #7f1d1d; color: white;'
+                    return ''
+                
+                st.dataframe(
+                    df_age_res.style.applymap(highlight_aging, subset=['Umur Ruahan (Jam)']),
+                    use_container_width=True, 
+                    height=400
+                )
+            else:
+                st.info("Data Age Mixing tidak ditemukan pada periode ini.")
 
 except Exception as e:
     st.error(f"Terjadi kesalahan pada aplikasi: {e}")
