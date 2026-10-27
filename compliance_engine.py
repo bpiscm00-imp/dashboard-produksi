@@ -52,7 +52,7 @@ def normalisasi_mesin(nama_mentah):
     text = re.sub(r'\s+', ' ', str(nama_mentah)).strip().upper()
     text = re.sub(r'^([A-Z\s]+?)\s*[-_]?\s*(\d+)$', r'\1 - \2', text)
     
-    # Mengonversi digit nomor mesin ke int() agar leading zero (02 -> 2) otomatis hilang
+    # Mengonversi digit nomor mesin ke int() agar leading zero (misal: Press - 02 -> Press - 2) otomatis hilang
     match_num = re.search(r'\d+', text)
     nomor = str(int(match_num.group(0))) if match_num else ""
     
@@ -89,6 +89,17 @@ def normalisasi_operator(nama_mentah):
     op = str(nama_mentah).strip().upper()
     op = re.sub(r'\s+', ' ', op)
     return op if op not in ['NAN', 'NONE', '', '<NA>', '0'] else "-"
+
+def is_qc_status_patuh(status_raw):
+    """
+    Memeriksa kepatuhan status QC secara fleksibel (case-insensitive)
+    untuk mengakomodasi berbagai variasi teks di Google Sheet.
+    """
+    if not status_raw or pd.isna(status_raw):
+        return False
+    s = str(status_raw).strip().upper()
+    valid_keywords = ["SELESAI", "AKHIR", "PASSED", "PASS", "OK", "RELEASED"]
+    return any(kw in s for kw in valid_keywords)
 
 def get_fiscal_date(dt_ts, oee_batches_today, oee_batches_yesterday, batch_no):
     if pd.isna(dt_ts) or dt_ts is None:
@@ -152,6 +163,7 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             op = normalisasi_operator(row.get('OPERATOR', row.get('NAMA_OPERATOR')))
             jam_mulai = pd.to_datetime(row.get('JAM_MULAI'), errors='coerce')
             
+            # Key tanpa operator agar OEE & SIC selalu cocok meskipun ada beda penulisan nama operator
             key = f"{tgl_acuan}_{batch}_{mesin}"
             
             if key not in master_log:
@@ -165,8 +177,10 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             master_log[key]['oee'] = True
             master_log[key]['oeeOutput'] += output_fg
             master_log[key]['picOee'] = op
-            if op != "-": master_log[key]['operator'] = op
-            if pd.notna(jam_mulai): master_log[key]['jamMulaiOEE'] = jam_mulai
+            if op != "-": 
+                master_log[key]['operator'] = op
+            if pd.notna(jam_mulai): 
+                master_log[key]['jamMulaiOEE'] = jam_mulai
             
             selesai = pd.to_datetime(row.get('JAM_SELESAI'), errors='coerce')
             if pd.notna(selesai) and pd.notna(ts_oee) and ts_oee < (selesai - timedelta(minutes=30)):
@@ -204,7 +218,8 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             master_log[key]['sic'] = True
             master_log[key]['sicOutput'] += output_jam
             master_log[key]['picSic'] = op
-            if master_log[key]['operator'] == "-": master_log[key]['operator'] = op
+            if master_log[key]['operator'] == "-": 
+                master_log[key]['operator'] = op
             master_log[key]['sicRows'] += 1
             master_log[key]['sicLastStatus'] = status
             
@@ -246,7 +261,7 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             global_reproses += reproses
             global_reject += reject
 
-    # D. DUAL EVALUATION ENGINE & AGREGASI TIM QC
+    # D. DUAL EVALUATION ENGINE & AUDIT MISMATCH
     mismatch_list = []
     prod_user_stats = {}
     qc_user_stats = {}
@@ -273,7 +288,7 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             prod_user_stats[op_prod]['total'] += 1
             
             oee_ok = item['oee'] and item['oeeTepatWaktu']
-            sic_ok = item['sic'] and (item['sicLastStatus'] in ["Selesai Proses", "SELESAI", "Istirahat"])
+            sic_ok = item['sic'] and (item['sicLastStatus'].upper() in ["SELESAI PROSES", "SELESAI", "AKHIR", "ISTIRAHAT"])
             if oee_ok and sic_ok:
                 prod_user_stats[op_prod]['patuh'] += 1
 
@@ -281,17 +296,21 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             dept_total_oee_sic += 1
             if item['oee'] and item['sic']:
                 oee_ok = item['oeeTepatWaktu']
-                sic_ok = item['sicLastStatus'] in ["Selesai Proses", "SELESAI", "Istirahat"]
-                if oee_ok and sic_ok: dept_patuh_oee_sic += 1
-                elif oee_ok and item['sicRows'] > 1: dept_patuh_oee_sic += 0.7
+                sic_ok = item['sicLastStatus'].upper() in ["SELESAI PROSES", "SELESAI", "AKHIR", "ISTIRAHAT"]
+                if oee_ok and sic_ok: 
+                    dept_patuh_oee_sic += 1
+                elif oee_ok and item['sicRows'] > 1: 
+                    dept_patuh_oee_sic += 0.7
                 
             if not is_proses_timbang:
                 dept_total_qc += 1
                 if has_qc_data:
                     qc_status = global_qc_map[qc_key]['lastStatus']
                     qc_rows = global_qc_map[qc_key]['rows']
-                    if is_qc_status_patuh(qc_status): dept_patuh_qc += 1
-                    elif qc_rows > 1: dept_patuh_qc += 0.7
+                    if is_qc_status_patuh(qc_status): 
+                        dept_patuh_qc += 1
+                    elif qc_rows > 1: 
+                        dept_patuh_qc += 0.7
 
         # Audit Kelalaian Input
         missing = []
@@ -384,7 +403,7 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
                     'pic': item['operator']
                 })
 
-    # Agregasi Tim QC
+    # Agregasi Tim Inspector QC (Sama Persis dengan Logika Department Summary)
     for qc_key, qc_item in global_qc_map.items():
         user_qc = qc_item['user']
         if user_qc and user_qc != "-":
@@ -392,13 +411,12 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
                 qc_user_stats[user_qc] = {'total': 0, 'patuh': 0}
             qc_user_stats[user_qc]['total'] += 1
             
-            # Menggunakan pengecekan status yang sama dengan Dept Summary
             if is_qc_status_patuh(qc_item['lastStatus']):
                 qc_user_stats[user_qc]['patuh'] += 1
             elif qc_item['rows'] > 1:
                 qc_user_stats[user_qc]['patuh'] += 0.7
 
-    # Format Tampilan Metrik
+    # Format Tampilan Metrik (Tampilkan N/A jika Data 0)
     if dept_total_oee_sic > 0:
         skor_dept_oee_sic_str = f"{round((dept_patuh_oee_sic / dept_total_oee_sic) * 100)}% ({round(dept_patuh_oee_sic)}/{dept_total_oee_sic})"
     else:
@@ -414,12 +432,14 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
     else:
         skor_akurasi_str = "N/A (Tidak ada data)"
 
+    # DataFrame Visual Compliance Produksi
     prod_chart_list = []
     for op, s in prod_user_stats.items():
         rate = round((s['patuh'] / s['total']) * 100, 2) if s['total'] > 0 else 0.0
         prod_chart_list.append({'Operator': op, 'Total Batch': s['total'], 'Compliance Rate (%)': rate})
     df_prod_compliance = pd.DataFrame(prod_chart_list)
 
+    # DataFrame Visual Compliance QC
     qc_chart_list = []
     for op, s in qc_user_stats.items():
         rate = round((s['patuh'] / s['total']) * 100, 2) if s['total'] > 0 else 0.0
@@ -435,6 +455,10 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
         'dfProdCompliance': df_prod_compliance,
         'dfQCCompliance': df_qc_compliance
     }
+
+# ============================================================
+# 3. GENERATOR RAPPORT CARD INDIVIDUAL & UNASSIGNED QC
+# ============================================================
 
 def get_rapport_cards_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
     audit_res = audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str)
@@ -532,6 +556,10 @@ def get_rapport_cards_range(df_oee, df_sic, df_qc, start_date_str, end_date_str)
         'dfProdCompliance': audit_res['dfProdCompliance'],
         'dfQCCompliance': audit_res['dfQCCompliance']
     }
+
+# ============================================================
+# 4. INTEGRASI INTEGRATOR WHATSAPP FONNTE
+# ============================================================
 
 def send_fonnte_wa(token, target, message):
     url = "https://api.fonnte.com/send"
