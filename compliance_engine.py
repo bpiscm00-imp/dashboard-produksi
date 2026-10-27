@@ -614,3 +614,33 @@ def build_wa_msg_qc(qc_list, periode_str):
 
     msg += "────────────────────────\n_Mohon Supervisor QC menindaklanjuti verifikasi lini tersebut._"
     return msg
+
+# ============================================================
+# 5. TREN COMPLIANCE
+# ============================================================
+def get_daily_compliance_trend(df_oee, df_sic, df_qc, start_date_str, end_date_str):
+    """
+    Menghitung tren rata-rata compliance rate harian untuk Tim Produksi dan Tim QC 
+    dalam rentang tanggal/bulan yang dipilih.
+    """
+    date_range = pd.date_range(start=start_date_str, end=end_date_str)
+    daily_list = []
+
+    for dt in date_range:
+        d_str = dt.strftime('%Y-%m-%d')
+        res = audit_compliance_range(df_oee, df_sic, df_qc, d_str, d_str)
+
+        skor_prod_str = res.get('skorDeptOEESIC', '')
+        skor_qc_str = res.get('skorDeptQC', '')
+
+        rate_prod = float(skor_prod_str.split('%')[0]) if '%' in skor_prod_str else None
+        rate_qc = float(skor_qc_str.split('%')[0]) if '%' in skor_qc_str else None
+
+        if rate_prod is not None or rate_qc is not None:
+            daily_list.append({
+                'Tanggal': dt.strftime('%d %b'),
+                'Tim Produksi (OEE & SIC)': rate_prod,
+                'Tim QC (Inspector)': rate_qc
+            })
+
+    return pd.DataFrame(daily_list)
