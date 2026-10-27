@@ -9,6 +9,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 from compliance_engine import (
     get_rapport_cards_range,
+    get_daily_compliance_trend,
     send_fonnte_wa,
     build_wa_msg_operator,
     build_wa_msg_qc,
@@ -647,7 +648,7 @@ try:
         st.dataframe(df_anomali_batch, width='stretch')
 
     # ==========================================
-    # TAB 4: KEPATUHAN & RAPPORT CARD COMPLIANCE
+    # TAB 4: KEPATUHAN & RAPPORT CARD
     # ==========================================
     with tab4:
         st.subheader("📋 Rapport Card Compliance Operator & Missed QC Checklist")
@@ -655,7 +656,7 @@ try:
         fonnte_token = st.secrets.get("FONNTE_TOKEN", "T3rQq4tCo8hEAC9ovYpa")
         wa_target_no = st.secrets.get("WA_TARGET", "6281283430510")
         
-        # 1. FILTER RENTANG WAKTU (HARIAN VS BULANAN)
+        # 1. FILTER RENTANG WAKTU AUDIT
         col_m1, col_m2 = st.columns([2, 3])
         with col_m1:
             mode_audit = st.radio("Pilih Opsi Tampilan Audit:", ["Harian (Specific Date)", "Bulanan (Full Month)"], horizontal=True)
@@ -668,6 +669,11 @@ try:
                 start_audit_str = audit_date.strftime("%Y-%m-%d")
                 end_audit_str = audit_date.strftime("%Y-%m-%d")
                 periode_judul = f"Tanggal {audit_date.strftime('%d %B %Y')}"
+                
+                # Logika Penarikan Tren 7 Hari Terakhir (H-6 s.d Tanggal Audit)
+                start_trend_str = (audit_date - timedelta(days=6)).strftime("%Y-%m-%d")
+                end_trend_str = end_audit_str
+                judul_trend = f"Tren Kepatuhan 7 Hari Terakhir ({ (audit_date - timedelta(days=6)).strftime('%d %b')} s.d. {audit_date.strftime('%d %b %Y')})"
         else:
             with col_m2:
                 col_bln, col_thn = st.columns(2)
@@ -680,11 +686,16 @@ try:
                 start_audit_str = f"{pilih_tahun:04d}-{pilih_bulan:02d}-01"
                 end_audit_str = f"{pilih_tahun:04d}-{pilih_bulan:02d}-{last_day:02d}"
                 periode_judul = f"Bulan {datetime(pilih_tahun, pilih_bulan, 1).strftime('%B %Y')}"
+                
+                # Logika Penarikan Tren 1 Bulan Penuh
+                start_trend_str = start_audit_str
+                end_trend_str = end_audit_str
+                judul_trend = f"Tren Kepatuhan Harian ({periode_judul})"
 
         with st.spinner("Menganalisis Kepatuhan 3-Form (OEE, SIC, QC)..."):
             compliance_res = get_rapport_cards_range(df_oee_full, df_sic_full, df_qc_full, start_audit_str, end_audit_str)
 
-        # 2. METRIKS UTAMA COMPLIANCE (METRIK TIDAK LAGI SHOW 100% JIKA DATA 0)
+        # 2. METRIKS UTAMA COMPLIANCE SUMMARY
         c1, c2, c3 = st.columns(3)
         c1.metric("Kepatuhan Dept OEE - SIC", compliance_res['skorDeptOEESIC'])
         c2.metric("Kepatuhan Dept QC", compliance_res['skorDeptQC'])
@@ -692,7 +703,44 @@ try:
 
         st.markdown("---")
 
-        # 3. VISUALISASI GRAFIK COMPLIANCE RATE USER (DIPISAH: PRODUKSI VS QC)
+        # 3. GRAFIK TREN COMPLIANCE HARIAN TIM PRODUKSI VS QC
+        st.markdown(f"### 📈 {judul_trend}")
+        
+        with st.spinner("Memuat tren kepatuhan..."):
+            df_daily_trend = get_daily_compliance_trend(df_oee_full, df_sic_full, df_qc_full, start_trend_str, end_trend_str)
+
+        if not df_daily_trend.empty:
+            df_trend_melted = df_daily_trend.melt(
+                id_vars=['Tanggal'], 
+                value_vars=['Tim Produksi (OEE & SIC)', 'Tim QC (Inspector)'],
+                var_name='Tim', 
+                value_name='Compliance Rate (%)'
+            ).dropna()
+
+            fig_trend = px.line(
+                df_trend_melted, 
+                x='Tanggal', 
+                y='Compliance Rate (%)', 
+                color='Tim',
+                markers=True,
+                color_discrete_map={
+                    'Tim Produksi (OEE & SIC)': '#008080',  # Teal
+                    'Tim QC (Inspector)': '#2B5B84'         # Blue
+                }
+            )
+            fig_trend.update_traces(hovertemplate='<b>%{data.name}</b><br>Tanggal: %{x}<br>Compliance Rate: %{y:.1f}%<extra></extra>')
+            fig_trend.update_layout(
+                height=350, 
+                yaxis_range=[0, 110],
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            st.plotly_chart(fig_trend, use_container_width=True)
+        else:
+            st.info("Tidak ada aktivitas data produksi/QC pada rentang waktu ini.")
+
+        st.markdown("---")
+
+        # 4. VISUALISASI GRAFIK COMPLIANCE RATE USER INDIVIDUAL (DIPISAH PRODUKSI VS QC)
         st.markdown(f"### 📊 Perbandingan Compliance Rate User ({periode_judul})")
         
         col_g1, col_g2 = st.columns(2)
@@ -711,7 +759,7 @@ try:
                 )
                 fig_prod_comp.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
                 fig_prod_comp.update_layout(height=380, xaxis_range=[0, 115], showlegend=False)
-                st.plotly_chart(fig_prod_comp, width='stretch')
+                st.plotly_chart(fig_prod_comp, use_container_width=True)
             else:
                 st.info(f"Tidak ada data aktivitas operator produksi pada {periode_judul}.")
 
@@ -729,13 +777,13 @@ try:
                 )
                 fig_qc_comp.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
                 fig_qc_comp.update_layout(height=380, xaxis_range=[0, 115], showlegend=False)
-                st.plotly_chart(fig_qc_comp, width='stretch')
+                st.plotly_chart(fig_qc_comp, use_container_width=True)
             else:
                 st.info(f"Tidak ada data aktivitas inspector QC pada {periode_judul}.")
 
         st.markdown("---")
 
-        # 4. DETAIL BREAKDOWN & WHATSAPP BLAST
+        # 5. DETAIL BREAKDOWN & WHATSAPP BLAST
         st.markdown(f"### 👤 Detail Rapport Card Individual ({periode_judul})")
         
         op_cards = compliance_res['operatorCards']
@@ -774,11 +822,12 @@ try:
 
         st.markdown("---")
         
+        # 6. MISSED CHECKLIST QC
         st.markdown(f"### 🚨 Missed Checklist QC (Batch Belum Diisi Form QC)")
         qc_pending = compliance_res['qcPendingList']
         
         if qc_pending:
-            st.dataframe(pd.DataFrame(qc_pending), width='stretch')
+            st.dataframe(pd.DataFrame(qc_pending), use_container_width=True)
             
             if st.button("📲 Send Alert Missed QC List via WhatsApp (Fonnte)"):
                 msg_qc = build_wa_msg_qc(qc_pending, periode_judul)
@@ -789,6 +838,3 @@ try:
                     st.error(f"Gagal mengirim WA: {res_qc.get('reason', 'Unknown Error')}")
         else:
             st.success(f"✅ Seluruh form QC telah terisi lengkap untuk {periode_judul}.")
-
-except Exception as e:
-    st.error(f"Terjadi kesalahan pada aplikasi: {e}")
