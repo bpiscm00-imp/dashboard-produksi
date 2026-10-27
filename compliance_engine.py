@@ -232,7 +232,7 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             status = str(row.get('STATUS_ALUR', '')).strip()
             
             total_qc_indiv += 1
-            if status in ["Selesai Proses", "AKHIR"]:
+            if is_qc_status_patuh(status):
                 patuh_qc_indiv += 1
                 
             qc_lookup_key = f"{fiscal_date_qc}_{batch}_{mesin}"
@@ -240,12 +240,13 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
                 global_qc_map[qc_lookup_key] = {'terisi': True, 'rows': 0, 'lastStatus': status, 'user': op_qc}
             global_qc_map[qc_lookup_key]['rows'] += 1
             global_qc_map[qc_lookup_key]['lastStatus'] = status
-            global_qc_map[qc_lookup_key]['user'] = op_qc
+            if op_qc != "-":
+                global_qc_map[qc_lookup_key]['user'] = op_qc
             
             global_reproses += reproses
             global_reject += reject
 
-    # D. DUAL EVALUATION ENGINE & AUDIT MISMATCH
+    # D. DUAL EVALUATION ENGINE & AGREGASI TIM QC
     mismatch_list = []
     prod_user_stats = {}
     qc_user_stats = {}
@@ -289,7 +290,7 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
                 if has_qc_data:
                     qc_status = global_qc_map[qc_key]['lastStatus']
                     qc_rows = global_qc_map[qc_key]['rows']
-                    if qc_status in ["Selesai Proses", "AKHIR"]: dept_patuh_qc += 1
+                    if is_qc_status_patuh(qc_status): dept_patuh_qc += 1
                     elif qc_rows > 1: dept_patuh_qc += 0.7
 
         # Audit Kelalaian Input
@@ -390,8 +391,12 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             if user_qc not in qc_user_stats:
                 qc_user_stats[user_qc] = {'total': 0, 'patuh': 0}
             qc_user_stats[user_qc]['total'] += 1
-            if qc_item['lastStatus'] in ["Selesai Proses", "AKHIR"]:
+            
+            # Menggunakan pengecekan status yang sama dengan Dept Summary
+            if is_qc_status_patuh(qc_item['lastStatus']):
                 qc_user_stats[user_qc]['patuh'] += 1
+            elif qc_item['rows'] > 1:
+                qc_user_stats[user_qc]['patuh'] += 0.7
 
     # Format Tampilan Metrik
     if dept_total_oee_sic > 0:
