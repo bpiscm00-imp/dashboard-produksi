@@ -250,7 +250,7 @@ try:
 
     st.info(f"📅 **Periode Data Aktif:** {periode_info} *(Bulan Berjalan Default)*")
 
-    # TAB NAVIGATION (5 TAB LENGKAP)
+    # TAB NAVIGATION
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📊 Ringkasan Eksekutif & OEE", 
         "🔍 Kualitas (QC) & Alur", 
@@ -336,7 +336,6 @@ try:
         kondisi_fp_kpi = df_sic['NAMA_MESIN'].astype(str).str.contains('Filling|Press', case=False, na=False)
         total_output_fp = pd.to_numeric(df_sic[kondisi_fp_kpi]['OUTPUT_PCS'], errors='coerce').fillna(0).sum()
 
-        # METRIK KPI TOP CARDS
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         col1.metric("Total Output (Filling & Press)", f"{total_output_fp:,.0f} Pcs")
         col2.metric("QTY Reject Kemasan (OEE)", f"{total_reject_kemas_oee:,.0f} Pcs")
@@ -347,7 +346,6 @@ try:
 
         st.markdown("---")
         
-        # RINGKASAN PER SUBBRAND & KINERJA MEDIAN MESIN
         col_chart1, col_chart2 = st.columns(2)
         with col_chart1:
             st.markdown("**10 Subbrand dengan Produksi Tertinggi (Pcs)**")
@@ -378,10 +376,6 @@ try:
                 st.info("Data tidak tersedia.")
 
         st.markdown("---")
-
-        # ---------------------------------------------------------
-        # ANALISIS KOMPONEN OEE PER NOMOR/LINE MESIN (4 GRAFIK UTAMA)
-        # ---------------------------------------------------------
         st.markdown("### 📊 Analisis Komponen OEE per Nomor/Line Mesin")
 
         list_mesin_tren = sorted(df_sic_fp['NAMA_MESIN'].unique().tolist())
@@ -498,9 +492,7 @@ try:
 
             st.markdown("---")
 
-            # ---------------------------------------------------------
             # TREN OUTPUT PER CYCLE & RATA-RATA OUTPUT PER JAM
-            # ---------------------------------------------------------
             st.markdown("### 📊 Tren Output per Cycle & Rata-Rata Output per Jam")
             df_sic_selected = df_sic_fp[df_sic_fp['NAMA_MESIN'].str.upper() == pilih_mesin_tren.upper()].copy()
             df_sic_selected['LINE_DISPLAY'] = df_sic_selected['NO_MESIN_LINE'].apply(format_line_number) if 'NO_MESIN_LINE' in df_sic_selected.columns else "Line Unknown"
@@ -548,9 +540,7 @@ try:
 
             st.markdown("---")
 
-            # ---------------------------------------------------------
             # TABEL DETAIL ANALISIS OEE
-            # ---------------------------------------------------------
             st.markdown(f"**📋 Tabel Detail Analisis OEE ({pilih_mesin_tren})**")
             if not df_oee_line_selected.empty:
                 df_table_oee = df_oee_line_selected.copy()
@@ -606,9 +596,7 @@ try:
             else:
                 st.info("Tidak ada data detail OEE untuk mesin yang dipilih.")
 
-            # ---------------------------------------------------------
             # ANALISIS TREN & STABILITAS OUTPUT ANTAK CYCLE
-            # ---------------------------------------------------------
             st.markdown("---")
             st.markdown("### 📈 Analisis Tren & Stabilitas Output antar Cycle")
 
@@ -974,42 +962,63 @@ try:
     # TAB 5: MONITORING OPERASIONAL & WIP
     # ==========================================
     with tab5:
-        st.subheader("🏭 Monitoring Operasional Real-Time, WIP & Age Mixing")
+        st.subheader("🏭 Monitoring Operasional Mesin & WIP (Sesuai Periode Filter)")
         
-        st.markdown("### 🟢 Real-Time Machine Status")
+        st.markdown("### 📊 Status Operasional Mesin (Periode Filter)")
         
-        df_all_machine_logs = pd.concat([
-            df_oee[['NAMA_MESIN', 'TIMESTAMP', 'NO_BATCH', 'CAPAIN_PRODUKSI_PCS']].rename(columns={'CAPAIN_PRODUKSI_PCS': 'OUTPUT'}),
-            df_sic[['NAMA_MESIN', 'TIMESTAMP', 'NO_BATCH', 'OUTPUT_PCS']].rename(columns={'OUTPUT_PCS': 'OUTPUT'})
-        ]).dropna(subset=['NAMA_MESIN', 'TIMESTAMP'])
+        # Gabungkan data log OEE dan SIC sesuai rentang tanggal yang dipilih
+        logs_oee = df_oee[['NAMA_MESIN', 'TIMESTAMP', 'NO_BATCH', 'CAPAIN_PRODUKSI_PCS']].rename(
+            columns={'CAPAIN_PRODUKSI_PCS': 'OUTPUT_PCS'}
+        )
+        logs_sic = df_sic[['NAMA_MESIN', 'TIMESTAMP', 'NO_BATCH', 'OUTPUT_PCS']]
         
-        if not df_all_machine_logs.empty:
-            df_all_machine_logs['TIMESTAMP'] = pd.to_datetime(df_all_machine_logs['TIMESTAMP'], errors='coerce')
-            latest_machines = df_all_machine_logs.sort_values('TIMESTAMP').groupby('NAMA_MESIN').last().reset_index()
-            
-            now = max_date if pd.notna(max_date) else pd.Timestamp.now()
-            
-            def get_machine_status(ts):
-                if pd.isna(ts): return 'Idle'
-                diff_hours = (now - ts).total_seconds() / 3600.0
-                return 'On Running' if diff_hours <= 2 else 'Idle'
+        df_all_machine_logs = pd.concat([logs_oee, logs_sic], ignore_index=True)
+        df_all_machine_logs['OUTPUT_PCS'] = pd.to_numeric(df_all_machine_logs['OUTPUT_PCS'], errors='coerce').fillna(0)
+        df_all_machine_logs = df_all_machine_logs[df_all_machine_logs['NAMA_MESIN'].astype(str).str.strip() != '']
 
-            latest_machines['STATUS'] = latest_machines['TIMESTAMP'].apply(get_machine_status)
+        # Dapatkan daftar seluruh mesin unik dari dataset full
+        all_known_machines = sorted(list(set(
+            pd.concat([df_oee_full['NAMA_MESIN'], df_sic_full['NAMA_MESIN']]).dropna().astype(str).str.title().unique()
+        )))
+
+        if all_known_machines:
+            # Hitung Total Output & Batch Terakhir per Mesin pada Periode Filter
+            machine_summary = []
+            for m_name in all_known_machines:
+                m_logs = df_all_machine_logs[df_all_machine_logs['NAMA_MESIN'].astype(str).str.upper() == m_name.upper()]
+                tot_out = m_logs['OUTPUT_PCS'].sum()
+                
+                # Cari batch terakhir yang dikerjakan pada periode ini
+                last_batch = "-"
+                if not m_logs.empty:
+                    valid_b = m_logs[m_logs['NO_BATCH'].astype(str).str.strip() != '']['NO_BATCH']
+                    if not valid_b.empty:
+                        last_batch = valid_b.iloc[-1]
+                
+                status_str = "Aktif Beroperasi" if tot_out > 0 else "Idle / Non-Aktif"
+                machine_summary.append({
+                    'NAMA_MESIN': m_name,
+                    'TOTAL_OUTPUT': tot_out,
+                    'NO_BATCH': last_batch,
+                    'STATUS': status_str
+                })
             
-            cnt_running = (latest_machines['STATUS'] == 'On Running').sum()
-            cnt_idle = (latest_machines['STATUS'] == 'Idle').sum()
-            cnt_total = len(latest_machines)
+            df_machine_status = pd.DataFrame(machine_summary)
+            
+            cnt_running = (df_machine_status['STATUS'] == 'Aktif Beroperasi').sum()
+            cnt_idle = (df_machine_status['STATUS'] == 'Idle / Non-Aktif').sum()
+            cnt_total = len(df_machine_status)
 
             m_col1, m_col2, m_col3 = st.columns(3)
-            m_col1.metric("🟢 Mesin On Running", f"{cnt_running} Mesin")
-            m_col2.metric("🔘 Mesin Idle", f"{cnt_idle} Mesin")
+            m_col1.metric("🟢 Mesin Aktif Beroperasi", f"{cnt_running} Mesin")
+            m_col2.metric("🔘 Mesin Idle / Non-Aktif", f"{cnt_idle} Mesin")
             m_col3.metric("🏭 Total Mesin Terdaftar", f"{cnt_total} Mesin")
 
             st.markdown("---")
             kat_options = ["Semua Mesin", "Filling", "Press", "Mixing / Timbang", "Packing"]
-            pilih_kat_mesin = st.selectbox("🔍 Filter Tampilan Mesin per Kategori:", kat_options)
+            pilih_kat_mesin = st.selectbox("🔍 Filter Tampilan Mesin per Kategori:", kat_options, key="sb_kat_mesin_tab5")
 
-            df_filtered_m = latest_machines.copy()
+            df_filtered_m = df_machine_status.copy()
             if pilih_kat_mesin != "Semua Mesin":
                 df_filtered_m = df_filtered_m[df_filtered_m['NAMA_MESIN'].str.contains(pilih_kat_mesin, case=False, na=False)]
 
@@ -1021,18 +1030,18 @@ try:
                     cols = st.columns(cols_per_row)
                     for j, m_data in enumerate(machine_list[i:i+cols_per_row]):
                         with cols[j]:
-                            is_running = m_data['STATUS'] == 'On Running'
+                            is_running = m_data['STATUS'] == 'Aktif Beroperasi'
                             card_bg = "#1e4620" if is_running else "#3a3a3a"
                             border_color = "#2e7d32" if is_running else "#616161"
-                            status_icon = "🟢 RUNNING" if is_running else "🔘 IDLE"
+                            status_icon = "🟢 AKTIF" if is_running else "🔘 IDLE"
                             
                             st.markdown(
                                 f"""
                                 <div style="background-color: {card_bg}; padding: 12px; border-radius: 8px; border: 1px solid {border_color}; margin-bottom: 10px;">
                                     <h5 style="margin:0; color: white;">{m_data['NAMA_MESIN']}</h5>
                                     <p style="margin:2px 0; font-size: 12px; color: #ddd;"><b>Status:</b> {status_icon}</p>
-                                    <p style="margin:2px 0; font-size: 11px; color: #bbb;"><b>Batch:</b> {m_data['NO_BATCH'] or '-'}</p>
-                                    <p style="margin:2px 0; font-size: 11px; color: #bbb;"><b>Output:</b> {m_data['OUTPUT']:,.0f} Pcs</p>
+                                    <p style="margin:2px 0; font-size: 11px; color: #bbb;"><b>Batch Terakhir:</b> {m_data['NO_BATCH']}</p>
+                                    <p style="margin:2px 0; font-size: 11px; color: #bbb;"><b>Total Output:</b> {m_data['TOTAL_OUTPUT']:,.0f} Pcs</p>
                                 </div>
                                 """,
                                 unsafe_allow_html=True
@@ -1047,7 +1056,18 @@ try:
             st.markdown("### 📋 Tabel WIP Operasional (Tracking Batch)")
             df_wip_res = get_wip_operational(df_sic, df_oee)
             if not df_wip_res.empty:
-                st.dataframe(df_wip_res, use_container_width=True, height=400)
+                # Memastikan nilai output per proses ter-agregasi sebagai TOTAL output per Batch
+                col_pcs = [c for c in df_wip_res.columns if '(Pcs)' in c]
+                for c in col_pcs:
+                    df_wip_res[c] = pd.to_numeric(df_wip_res[c], errors='coerce').fillna(0)
+                
+                group_cols = [c for c in ['No Batch', 'Subbrand', 'Mulai (Tgl & Jam)'] if c in df_wip_res.columns]
+                if group_cols:
+                    df_wip_sum = df_wip_res.groupby(group_cols, as_index=False)[col_pcs].sum()
+                else:
+                    df_wip_sum = df_wip_res
+
+                st.dataframe(df_wip_sum, use_container_width=True, height=400)
             else:
                 st.info("Data WIP Operasional tidak ditemukan pada periode ini.")
 
