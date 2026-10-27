@@ -126,6 +126,7 @@ def clean_data(df_qc, df_sic, df_oee):
     df_sic['SUBBRAND_MASTER'] = df_sic['NO_BATCH'].map(master_sb).fillna('UNKNOWN')
     df_oee['SUBBRAND_MASTER'] = df_oee['NO_BATCH'].map(master_sb).fillna('UNKNOWN')
 
+    # Identifikasi Anomali Double Input SIC (>30 Menit)
     df_sic = df_sic.sort_values(by=['NO_BATCH', 'NAMA_MESIN', 'CYCLE', 'TIMESTAMP'])
     df_sic['TIME_DIFF'] = df_sic.groupby(['NO_BATCH', 'NAMA_MESIN', 'CYCLE'])['TIMESTAMP'].diff()
     
@@ -133,8 +134,8 @@ def clean_data(df_qc, df_sic, df_oee):
     if not df_sic_anomali_double.empty:
         df_sic_anomali_double['KETERANGAN_ANOMALI'] = 'Double Input SIC (>30 Menit)'
     
-    kondisi_hapus = (df_sic['TIME_DIFF'] >= pd.Timedelta(seconds=0)) & (df_sic['TIME_DIFF'] <= pd.Timedelta(minutes=30))
-    df_sic_bersih = df_sic[~kondisi_hapus].copy()
+    # Pertahankan seluruh data SIC utuh (tanpa menghapus baris berdurasi <30 menit)
+    df_sic_bersih = df_sic.copy()
 
     if 'OUTPUT_PCS' in df_sic_bersih.columns: df_sic_bersih['OUTPUT_PCS'] = pd.to_numeric(df_sic_bersih['OUTPUT_PCS'], errors='coerce').fillna(0)
     if 'REJECT_PCS' in df_qc.columns: df_qc['REJECT_PCS'] = pd.to_numeric(df_qc['REJECT_PCS'], errors='coerce').fillna(0)
@@ -354,7 +355,7 @@ try:
                                labels={'OUTPUT_PCS': 'Total Output', 'SUBBRAND_MASTER': 'Varian Produk'},
                                color='OUTPUT_PCS', color_continuous_scale='Blues')
             fig_brand.update_layout(yaxis={'categoryorder':'total ascending'}, showlegend=False, height=400)
-            st.plotly_chart(fig_brand, width='stretch')
+            st.plotly_chart(fig_brand, use_container_width=True)
 
         with col_chart2:
             st.markdown("**Perbandingan Capaian (Khusus Mesin Filling & Press)**")
@@ -369,7 +370,7 @@ try:
                                    labels={'OUTPUT_PCS': 'Median Output / Cycle (Pcs)', 'NAMA_MESIN': 'Nama Mesin'},
                                    color='OUTPUT_PCS', color_continuous_scale='Teal', text='OUTPUT_PCS')
                 fig_mesin.update_layout(height=400)
-                st.plotly_chart(fig_mesin, width='stretch')
+                st.plotly_chart(fig_mesin, use_container_width=True)
             else:
                 st.info("Data tidak tersedia.")
 
@@ -410,14 +411,14 @@ try:
                     fig_oee = px.bar(df_line_kpi, x='Nomor Mesin', y='OEE (%)', text='OEE (%)', color='OEE (%)', color_continuous_scale='Teal')
                     fig_oee.update_traces(texttemplate='%{text:.2f}%', textposition='outside')
                     fig_oee.update_layout(height=350, yaxis_range=[0, 115])
-                    st.plotly_chart(fig_oee, width='stretch')
+                    st.plotly_chart(fig_oee, use_container_width=True)
 
                 with col_oee2:
                     st.markdown(f"**Performance Rate Total ({pilih_mesin_tren})**")
                     fig_perf = px.bar(df_line_kpi, x='Nomor Mesin', y='Performance (%)', text='Performance (%)', color='Performance (%)', color_continuous_scale='Blues')
                     fig_perf.update_traces(texttemplate='%{text:.2f}%', textposition='outside')
                     fig_perf.update_layout(height=350, yaxis_range=[0, 115])
-                    st.plotly_chart(fig_perf, width='stretch')
+                    st.plotly_chart(fig_perf, use_container_width=True)
 
                 col_oee3, col_oee4 = st.columns(2)
                 with col_oee3:
@@ -425,14 +426,14 @@ try:
                     fig_qual = px.bar(df_line_kpi, x='Nomor Mesin', y='Quality (%)', text='Quality (%)', color='Quality (%)', color_continuous_scale='Greens')
                     fig_qual.update_traces(texttemplate='%{text:.2f}%', textposition='outside')
                     fig_qual.update_layout(height=350, yaxis_range=[0, 115])
-                    st.plotly_chart(fig_qual, width='stretch')
+                    st.plotly_chart(fig_qual, use_container_width=True)
 
                 with col_oee4:
                     st.markdown(f"**Availability Rate Total ({pilih_mesin_tren})**")
                     fig_avail = px.bar(df_line_kpi, x='Nomor Mesin', y='Availability (%)', text='Availability (%)', color='Availability (%)', color_continuous_scale='Purples')
                     fig_avail.update_traces(texttemplate='%{text:.0f}%', textposition='outside')
                     fig_avail.update_layout(height=350, yaxis_range=[0, 115])
-                    st.plotly_chart(fig_avail, width='stretch')
+                    st.plotly_chart(fig_avail, use_container_width=True)
             else:
                 st.info("Data komponen OEE per line belum tersedia.")
         else:
@@ -461,14 +462,14 @@ try:
                     fig_oee = px.line(df_daily_kpi, x='Tanggal', y='OEE (%)', color='Nomor Mesin', markers=True)
                     fig_oee.update_traces(hovertemplate='<b>%{data.name}</b><br>Tanggal: %{x}<br>OEE: %{y:.2f}%<extra></extra>')
                     fig_oee.update_layout(height=350, yaxis_range=[0, 110], legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5))
-                    st.plotly_chart(fig_oee, width='stretch')
+                    st.plotly_chart(fig_oee, use_container_width=True)
 
                 with col_oee2:
                     st.markdown(f"**Tren Harian Performance Rate ({pilih_mesin_tren})**")
                     fig_perf = px.line(df_daily_kpi, x='Tanggal', y='Performance (%)', color='Nomor Mesin', markers=True)
                     fig_perf.update_traces(hovertemplate='<b>%{data.name}</b><br>Tanggal: %{x}<br>Performance: %{y:.2f}%<extra></extra>')
                     fig_perf.update_layout(height=350, yaxis_range=[0, 110], legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5))
-                    st.plotly_chart(fig_perf, width='stretch')
+                    st.plotly_chart(fig_perf, use_container_width=True)
 
                 col_oee3, col_oee4 = st.columns(2)
                 with col_oee3:
@@ -476,14 +477,14 @@ try:
                     fig_qual = px.line(df_daily_kpi, x='Tanggal', y='Quality (%)', color='Nomor Mesin', markers=True)
                     fig_qual.update_traces(hovertemplate='<b>%{data.name}</b><br>Tanggal: %{x}<br>Quality: %{y:.2f}%<extra></extra>')
                     fig_qual.update_layout(height=350, yaxis_range=[0, 110], legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5))
-                    st.plotly_chart(fig_qual, width='stretch')
+                    st.plotly_chart(fig_qual, use_container_width=True)
 
                 with col_oee4:
                     st.markdown(f"**Tren Harian Availability Rate ({pilih_mesin_tren})**")
                     fig_avail = px.line(df_daily_kpi, x='Tanggal', y='Availability (%)', color='Nomor Mesin', markers=True)
                     fig_avail.update_traces(hovertemplate='<b>%{data.name}</b><br>Tanggal: %{x}<br>Availability: %{y:.0f}%<extra></extra>')
                     fig_avail.update_layout(height=350, yaxis_range=[0, 110], legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5))
-                    st.plotly_chart(fig_avail, width='stretch')
+                    st.plotly_chart(fig_avail, use_container_width=True)
             else:
                 st.info("Data harian komponen OEE per line belum tersedia.")
 
@@ -562,7 +563,7 @@ try:
                                     labels={'BULAN_TAHUN': 'Bulan', 'Reject Rate (%)': 'Reject Rate (%)'})
                 fig_rej_m.update_traces(hovertemplate='Bulan: %{x}<br>Reject Rate: %{y:.2f}%<extra></extra>')
                 fig_rej_m.update_layout(height=350)
-                st.plotly_chart(fig_rej_m, width='stretch')
+                st.plotly_chart(fig_rej_m, use_container_width=True)
             else:
                 st.info("Data tren bulanan belum tersedia.")
 
@@ -573,7 +574,7 @@ try:
                                     labels={'BULAN_TAHUN': 'Bulan', 'Reproses Rate (%)': 'Reproses Rate (%)'})
                 fig_rep_m.update_traces(hovertemplate='Bulan: %{x}<br>Reproses Rate: %{y:.2f}%<extra></extra>')
                 fig_rep_m.update_layout(height=350)
-                st.plotly_chart(fig_rep_m, width='stretch')
+                st.plotly_chart(fig_rep_m, use_container_width=True)
             else:
                 st.info("Data tren bulanan belum tersedia.")
 
@@ -612,7 +613,7 @@ try:
                     max_rej = summary_line_qc['Reject Rate (%)'].max()
                     fig_bar_rej.update_traces(texttemplate='%{text:.2f}%', textposition='outside')
                     fig_bar_rej.update_layout(height=350, yaxis_range=[0, max(max_rej * 1.25, 5)], showlegend=False)
-                    st.plotly_chart(fig_bar_rej, width='stretch')
+                    st.plotly_chart(fig_bar_rej, use_container_width=True)
                 else:
                     st.info("Data tidak tersedia.")
 
@@ -628,7 +629,7 @@ try:
                     max_rep = summary_line_qc['Reproses Rate (%)'].max()
                     fig_bar_rep.update_traces(texttemplate='%{text:.2f}%', textposition='outside')
                     fig_bar_rep.update_layout(height=350, yaxis_range=[0, max(max_rep * 1.25, 5)], showlegend=False)
-                    st.plotly_chart(fig_bar_rep, width='stretch')
+                    st.plotly_chart(fig_bar_rep, use_container_width=True)
                 else:
                     st.info("Data tidak tersedia.")
         else:
@@ -642,13 +643,13 @@ try:
         st.info("Data di bawah ini telah disingkirkan dari perhitungan grafik utama agar tidak merusak akurasi perhitungan.")
         
         st.markdown("**1. Data Double Input SIC (Selisih > 30 Menit)**")
-        st.dataframe(df_anomali_double, width='stretch')
+        st.dataframe(df_anomali_double, use_container_width=True)
         
         st.markdown("**2. Data No Batch Tidak Valid (Selain Proses Timbang)**")
-        st.dataframe(df_anomali_batch, width='stretch')
+        st.dataframe(df_anomali_batch, use_container_width=True)
 
     # ==========================================
-    # TAB 4: KEPATUHAN & RAPPORT CARD
+    # TAB 4: KEPATUHAN & RAPPORT CARD COMPLIANCE
     # ==========================================
     with tab4:
         st.subheader("📋 Rapport Card Compliance Operator & Missed QC Checklist")
@@ -670,10 +671,10 @@ try:
                 end_audit_str = audit_date.strftime("%Y-%m-%d")
                 periode_judul = f"Tanggal {audit_date.strftime('%d %B %Y')}"
                 
-                # Logika Penarikan Tren 7 Hari Terakhir (H-6 s.d Tanggal Audit)
+                # Penarikan Tren 7 Hari Terakhir (H-6 s.d Tanggal Audit)
                 start_trend_str = (audit_date - timedelta(days=6)).strftime("%Y-%m-%d")
                 end_trend_str = end_audit_str
-                judul_trend = f"Tren Kepatuhan 7 Hari Terakhir ({ (audit_date - timedelta(days=6)).strftime('%d %b')} s.d. {audit_date.strftime('%d %b %Y')})"
+                judul_trend = f"Tren Kepatuhan 7 Hari Terakhir ({(audit_date - timedelta(days=6)).strftime('%d %b')} s.d. {audit_date.strftime('%d %b %Y')})"
         else:
             with col_m2:
                 col_bln, col_thn = st.columns(2)
@@ -687,7 +688,7 @@ try:
                 end_audit_str = f"{pilih_tahun:04d}-{pilih_bulan:02d}-{last_day:02d}"
                 periode_judul = f"Bulan {datetime(pilih_tahun, pilih_bulan, 1).strftime('%B %Y')}"
                 
-                # Logika Penarikan Tren 1 Bulan Penuh
+                # Penarikan Tren 1 Bulan Penuh
                 start_trend_str = start_audit_str
                 end_trend_str = end_audit_str
                 judul_trend = f"Tren Kepatuhan Harian ({periode_judul})"
@@ -838,3 +839,6 @@ try:
                     st.error(f"Gagal mengirim WA: {res_qc.get('reason', 'Unknown Error')}")
         else:
             st.success(f"✅ Seluruh form QC telah terisi lengkap untuk {periode_judul}.")
+
+except Exception as e:
+    st.error(f"Terjadi kesalahan pada aplikasi: {e}")
