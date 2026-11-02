@@ -15,8 +15,7 @@ from compliance_engine import (
     build_wa_msg_qc,
     is_qc_status_patuh,
     get_wip_operational,
-    get_age_mixing,
-    is_qc_status_patuh
+    get_age_mixing
 )
 
 st.set_page_config(page_title="Dashboard Produksi & Kepatuhan", layout="wide")
@@ -966,30 +965,39 @@ try:
         
         st.markdown("### 📊 Status Operasional Line Mesin (Periode Filter)")
         
-        # Ambil daftar Kategori/Jenis Mesin dinamis (sama seperti Tab 1 & Tab 2)
-        list_kategori_mesin = sorted(list(set(
-            pd.concat([df_oee_full['NAMA_MESIN'], df_sic_full['NAMA_MESIN']]).dropna().astype(str).str.title().unique()
-        )))
+        # 1. Ambil & bersihkan daftar Kategori/Jenis Mesin valid (menghilangkan angka murni/nomor line seperti '10', '100', '12', '9')
+        raw_m_oee = df_oee_full['NAMA_MESIN'].dropna().astype(str).str.strip().str.title().unique()
+        raw_m_sic = df_sic_full['NAMA_MESIN'].dropna().astype(str).str.strip().str.title().unique()
+        
+        all_raw_machines = set(raw_m_oee).union(set(raw_m_sic))
+        
+        # Filter hanya string nama mesin teks valid
+        list_kategori_mesin = sorted([
+            m for m in all_raw_machines 
+            if m and not m.replace('.', '').isdigit() and len(m) > 2 and m.upper() not in ['NAN', 'NONE', 'UNKNOWN', '']
+        ])
 
         if list_kategori_mesin:
             pilih_kat_mesin = st.selectbox("🔍 Pilih Jenis / Kategori Mesin:", list_kategori_mesin, key="sb_kat_mesin_tab5")
 
-            # Persiapkan log OEE & SIC lengkap dengan Line Number untuk periode filter
+            # 2. Gabungkan log OEE & SIC untuk periode filter aktif
             logs_oee = df_oee[['NAMA_MESIN', 'NO_MESIN_LINE', 'TIMESTAMP', 'NO_BATCH', 'CAPAIN_PRODUKSI_PCS']].rename(
                 columns={'CAPAIN_PRODUKSI_PCS': 'OUTPUT_PCS'}
             )
             logs_sic = df_sic[['NAMA_MESIN', 'NO_MESIN_LINE', 'TIMESTAMP', 'NO_BATCH', 'OUTPUT_PCS']]
             
             df_all_logs = pd.concat([logs_oee, logs_sic], ignore_index=True)
+            df_all_logs['NAMA_MESIN_CLEAN'] = df_all_logs['NAMA_MESIN'].astype(str).str.strip().str.title()
             df_all_logs['OUTPUT_PCS'] = pd.to_numeric(df_all_logs['OUTPUT_PCS'], errors='coerce').fillna(0)
             df_all_logs['LINE_DISPLAY'] = df_all_logs['NO_MESIN_LINE'].apply(format_line_number)
 
-            # Filter khusus untuk Kategori Mesin yang dipilih
-            df_selected_kat = df_all_logs[df_all_logs['NAMA_MESIN'].astype(str).str.upper() == pilih_kat_mesin.upper()].copy()
+            # Filter data khusus untuk kategori mesin yang dipilih
+            df_selected_kat = df_all_logs[df_all_logs['NAMA_MESIN_CLEAN'] == pilih_kat_mesin].copy()
 
-            # Dapatkan seluruh daftar Line unik dari dataset full untuk mesin tersebut
-            full_oee_lines = df_oee_full[df_oee_full['NAMA_MESIN'].astype(str).str.upper() == pilih_kat_mesin.upper()]['NO_MESIN_LINE'].apply(format_line_number)
-            full_sic_lines = df_sic_full[df_sic_full['NAMA_MESIN'].astype(str).str.upper() == pilih_kat_mesin.upper()]['NO_MESIN_LINE'].apply(format_line_number)
+            # 3. Ambil seluruh daftar Line unik dari dataset full untuk kategori mesin yang dipilih
+            full_oee_lines = df_oee_full[df_oee_full['NAMA_MESIN'].astype(str).str.strip().str.title() == pilih_kat_mesin]['NO_MESIN_LINE'].apply(format_line_number)
+            full_sic_lines = df_sic_full[df_sic_full['NAMA_MESIN'].astype(str).str.strip().str.title() == pilih_kat_mesin]['NO_MESIN_LINE'].apply(format_line_number)
+            
             all_known_lines = sorted(list(set(pd.concat([full_oee_lines, full_sic_lines]).unique())))
 
             if not all_known_lines:
