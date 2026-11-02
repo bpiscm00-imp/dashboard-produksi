@@ -964,73 +964,78 @@ try:
     with tab5:
         st.subheader("🏭 Monitoring Operasional Mesin & WIP (Sesuai Periode Filter)")
         
-        st.markdown("### 📊 Status Operasional Mesin (Periode Filter)")
+        st.markdown("### 📊 Status Operasional Line Mesin (Periode Filter)")
         
-        # Gabungkan data log OEE dan SIC sesuai rentang tanggal yang dipilih
-        logs_oee = df_oee[['NAMA_MESIN', 'TIMESTAMP', 'NO_BATCH', 'CAPAIN_PRODUKSI_PCS']].rename(
-            columns={'CAPAIN_PRODUKSI_PCS': 'OUTPUT_PCS'}
-        )
-        logs_sic = df_sic[['NAMA_MESIN', 'TIMESTAMP', 'NO_BATCH', 'OUTPUT_PCS']]
-        
-        df_all_machine_logs = pd.concat([logs_oee, logs_sic], ignore_index=True)
-        df_all_machine_logs['OUTPUT_PCS'] = pd.to_numeric(df_all_machine_logs['OUTPUT_PCS'], errors='coerce').fillna(0)
-        df_all_machine_logs = df_all_machine_logs[df_all_machine_logs['NAMA_MESIN'].astype(str).str.strip() != '']
-
-        # Dapatkan daftar seluruh mesin unik dari dataset full
-        all_known_machines = sorted(list(set(
+        # Ambil daftar Kategori/Jenis Mesin dinamis (sama seperti Tab 1 & Tab 2)
+        list_kategori_mesin = sorted(list(set(
             pd.concat([df_oee_full['NAMA_MESIN'], df_sic_full['NAMA_MESIN']]).dropna().astype(str).str.title().unique()
         )))
 
-        if all_known_machines:
-            # Hitung Total Output & Batch Terakhir per Mesin pada Periode Filter
-            machine_summary = []
-            for m_name in all_known_machines:
-                m_logs = df_all_machine_logs[df_all_machine_logs['NAMA_MESIN'].astype(str).str.upper() == m_name.upper()]
-                tot_out = m_logs['OUTPUT_PCS'].sum()
+        if list_kategori_mesin:
+            pilih_kat_mesin = st.selectbox("🔍 Pilih Jenis / Kategori Mesin:", list_kategori_mesin, key="sb_kat_mesin_tab5")
+
+            # Persiapkan log OEE & SIC lengkap dengan Line Number untuk periode filter
+            logs_oee = df_oee[['NAMA_MESIN', 'NO_MESIN_LINE', 'TIMESTAMP', 'NO_BATCH', 'CAPAIN_PRODUKSI_PCS']].rename(
+                columns={'CAPAIN_PRODUKSI_PCS': 'OUTPUT_PCS'}
+            )
+            logs_sic = df_sic[['NAMA_MESIN', 'NO_MESIN_LINE', 'TIMESTAMP', 'NO_BATCH', 'OUTPUT_PCS']]
+            
+            df_all_logs = pd.concat([logs_oee, logs_sic], ignore_index=True)
+            df_all_logs['OUTPUT_PCS'] = pd.to_numeric(df_all_logs['OUTPUT_PCS'], errors='coerce').fillna(0)
+            df_all_logs['LINE_DISPLAY'] = df_all_logs['NO_MESIN_LINE'].apply(format_line_number)
+
+            # Filter khusus untuk Kategori Mesin yang dipilih
+            df_selected_kat = df_all_logs[df_all_logs['NAMA_MESIN'].astype(str).str.upper() == pilih_kat_mesin.upper()].copy()
+
+            # Dapatkan seluruh daftar Line unik dari dataset full untuk mesin tersebut
+            full_oee_lines = df_oee_full[df_oee_full['NAMA_MESIN'].astype(str).str.upper() == pilih_kat_mesin.upper()]['NO_MESIN_LINE'].apply(format_line_number)
+            full_sic_lines = df_sic_full[df_sic_full['NAMA_MESIN'].astype(str).str.upper() == pilih_kat_mesin.upper()]['NO_MESIN_LINE'].apply(format_line_number)
+            all_known_lines = sorted(list(set(pd.concat([full_oee_lines, full_sic_lines]).unique())))
+
+            if not all_known_lines:
+                all_known_lines = ["Line Unknown"]
+
+            line_summary = []
+            for l_name in all_known_lines:
+                line_logs = df_selected_kat[df_selected_kat['LINE_DISPLAY'] == l_name]
+                tot_out = line_logs['OUTPUT_PCS'].sum()
                 
-                # Cari batch terakhir yang dikerjakan pada periode ini
                 last_batch = "-"
-                if not m_logs.empty:
-                    valid_b = m_logs[m_logs['NO_BATCH'].astype(str).str.strip() != '']['NO_BATCH']
+                if not line_logs.empty:
+                    valid_b = line_logs[line_logs['NO_BATCH'].astype(str).str.strip() != '']['NO_BATCH']
                     if not valid_b.empty:
                         last_batch = valid_b.iloc[-1]
                 
                 status_str = "Aktif Beroperasi" if tot_out > 0 else "Idle / Non-Aktif"
-                machine_summary.append({
-                    'NAMA_MESIN': m_name,
+                line_summary.append({
+                    'LINE_DISPLAY': l_name,
                     'TOTAL_OUTPUT': tot_out,
                     'NO_BATCH': last_batch,
                     'STATUS': status_str
                 })
             
-            df_machine_status = pd.DataFrame(machine_summary)
+            df_line_status = pd.DataFrame(line_summary)
             
-            cnt_running = (df_machine_status['STATUS'] == 'Aktif Beroperasi').sum()
-            cnt_idle = (df_machine_status['STATUS'] == 'Idle / Non-Aktif').sum()
-            cnt_total = len(df_machine_status)
+            cnt_running = (df_line_status['STATUS'] == 'Aktif Beroperasi').sum()
+            cnt_idle = (df_line_status['STATUS'] == 'Idle / Non-Aktif').sum()
+            cnt_total = len(df_line_status)
 
             m_col1, m_col2, m_col3 = st.columns(3)
-            m_col1.metric("🟢 Mesin Aktif Beroperasi", f"{cnt_running} Mesin")
-            m_col2.metric("🔘 Mesin Idle / Non-Aktif", f"{cnt_idle} Mesin")
-            m_col3.metric("🏭 Total Mesin Terdaftar", f"{cnt_total} Mesin")
+            m_col1.metric("🟢 Line Aktif Beroperasi", f"{cnt_running} Line")
+            m_col2.metric("🔘 Line Idle / Non-Aktif", f"{cnt_idle} Line")
+            m_col3.metric(f"🏭 Total Line ({pilih_kat_mesin})", f"{cnt_total} Line")
 
             st.markdown("---")
-            kat_options = ["Semua Mesin", "Filling", "Press", "Mixing / Timbang", "Packing"]
-            pilih_kat_mesin = st.selectbox("🔍 Filter Tampilan Mesin per Kategori:", kat_options, key="sb_kat_mesin_tab5")
 
-            df_filtered_m = df_machine_status.copy()
-            if pilih_kat_mesin != "Semua Mesin":
-                df_filtered_m = df_filtered_m[df_filtered_m['NAMA_MESIN'].str.contains(pilih_kat_mesin, case=False, na=False)]
-
-            with st.expander(f"📌 Tampilkan Kartu Status Mesin ({len(df_filtered_m)} Mesin)", expanded=True):
+            with st.expander(f"📌 Tampilkan Kartu Status Line - {pilih_kat_mesin} ({cnt_total} Line)", expanded=True):
                 cols_per_row = 4
-                machine_list = df_filtered_m.to_dict('records')
+                line_list = df_line_status.to_dict('records')
                 
-                for i in range(0, len(machine_list), cols_per_row):
+                for i in range(0, len(line_list), cols_per_row):
                     cols = st.columns(cols_per_row)
-                    for j, m_data in enumerate(machine_list[i:i+cols_per_row]):
+                    for j, l_data in enumerate(line_list[i:i+cols_per_row]):
                         with cols[j]:
-                            is_running = m_data['STATUS'] == 'Aktif Beroperasi'
+                            is_running = l_data['STATUS'] == 'Aktif Beroperasi'
                             card_bg = "#1e4620" if is_running else "#3a3a3a"
                             border_color = "#2e7d32" if is_running else "#616161"
                             status_icon = "🟢 AKTIF" if is_running else "🔘 IDLE"
@@ -1038,16 +1043,17 @@ try:
                             st.markdown(
                                 f"""
                                 <div style="background-color: {card_bg}; padding: 12px; border-radius: 8px; border: 1px solid {border_color}; margin-bottom: 10px;">
-                                    <h5 style="margin:0; color: white;">{m_data['NAMA_MESIN']}</h5>
+                                    <h5 style="margin:0; color: white;">{l_data['LINE_DISPLAY']}</h5>
+                                    <p style="margin:2px 0; font-size: 11px; color: #a5d6a7;"><b>Mesin:</b> {pilih_kat_mesin}</p>
                                     <p style="margin:2px 0; font-size: 12px; color: #ddd;"><b>Status:</b> {status_icon}</p>
-                                    <p style="margin:2px 0; font-size: 11px; color: #bbb;"><b>Batch Terakhir:</b> {m_data['NO_BATCH']}</p>
-                                    <p style="margin:2px 0; font-size: 11px; color: #bbb;"><b>Total Output:</b> {m_data['TOTAL_OUTPUT']:,.0f} Pcs</p>
+                                    <p style="margin:2px 0; font-size: 11px; color: #bbb;"><b>Batch Terakhir:</b> {l_data['NO_BATCH']}</p>
+                                    <p style="margin:2px 0; font-size: 11px; color: #bbb;"><b>Total Output:</b> {l_data['TOTAL_OUTPUT']:,.0f} Pcs</p>
                                 </div>
                                 """,
                                 unsafe_allow_html=True
                             )
         else:
-            st.info("Tidak ada data transaksi mesin yang terdeteksi.")
+            st.info("Tidak ada data jenis mesin yang terdeteksi.")
 
         st.markdown("---")
         col_wip1, col_wip2 = st.columns([3, 2])
@@ -1056,7 +1062,6 @@ try:
             st.markdown("### 📋 Tabel WIP Operasional (Tracking Batch)")
             df_wip_res = get_wip_operational(df_sic, df_oee)
             if not df_wip_res.empty:
-                # Memastikan nilai output per proses ter-agregasi sebagai TOTAL output per Batch
                 col_pcs = [c for c in df_wip_res.columns if '(Pcs)' in c]
                 for c in col_pcs:
                     df_wip_res[c] = pd.to_numeric(df_wip_res[c], errors='coerce').fillna(0)
