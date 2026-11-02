@@ -53,6 +53,15 @@ def load_data():
 @st.cache_data(ttl=600)
 def clean_data(df_qc, df_sic, df_oee):
     for df in [df_qc, df_sic, df_oee]:
+        # Penanganan fallback jika kolom NO_MESIN_LINE belum ada di data mentah sheet
+        if 'NO_MESIN_LINE' not in df.columns:
+            if 'MESIN_FULL' in df.columns:
+                df['NO_MESIN_LINE'] = df['MESIN_FULL'].astype(str).str.extract(r'(\d+)')[0].fillna('')
+            elif 'NO_MESIN' in df.columns:
+                df['NO_MESIN_LINE'] = df['NO_MESIN'].astype(str)
+            else:
+                df['NO_MESIN_LINE'] = ''
+
         for col in ['NO_BATCH', 'NAMA_MESIN', 'SUBBRAND', 'VARIAN_PRODUK', 'NO_MESIN_LINE', 'MESIN_FULL', 'PROSES']:
             if col in df.columns:
                 df[col] = df[col].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
@@ -655,12 +664,12 @@ try:
 
         q_col1, q_col2, q_col3, q_col4 = st.columns(4)
         q_col1.metric("Total Reject (QC)", f"{tot_reject:,.0f} Pcs")
-        q_col2.metric("Total Reproses (QC)", f"{tot_reproses:,.0f} Pcs")
+        q_col2.metric("Total Repproses (QC)", f"{tot_reproses:,.0f} Pcs")
         q_col3.metric("Total Defect (QC)", f"{(tot_reject + tot_reproses):,.0f} Pcs")
         q_col4.metric("Overall Quality Rate", f"{overall_quality:.2f} %")
 
         st.markdown("---")
-        st.markdown("### 📈 Tren Bulanan Reject Rate & Reproses Rate (Keseluruhan Periode Data)")
+        st.markdown("### 📈 Tren Bulanan Reject Rate & Repproses Rate (Keseluruhan Periode Data)")
         
         df_qc_temp_full = df_qc_full.copy()
         df_qc_temp_full['NO_BATCH_KEY'] = df_qc_temp_full['NO_BATCH'].astype(str).str.strip()
@@ -965,13 +974,12 @@ try:
         
         st.markdown("### 📊 Status Operasional Line Mesin (Periode Filter)")
         
-        # 1. Ambil & bersihkan daftar Kategori/Jenis Mesin valid (menghilangkan angka murni/nomor line seperti '10', '100', '12', '9')
+        # 1. Ambil & bersihkan daftar Kategori/Jenis Mesin valid
         raw_m_oee = df_oee_full['NAMA_MESIN'].dropna().astype(str).str.strip().str.title().unique()
         raw_m_sic = df_sic_full['NAMA_MESIN'].dropna().astype(str).str.strip().str.title().unique()
         
         all_raw_machines = set(raw_m_oee).union(set(raw_m_sic))
         
-        # Filter hanya string nama mesin teks valid
         list_kategori_mesin = sorted([
             m for m in all_raw_machines 
             if m and not m.replace('.', '').isdigit() and len(m) > 2 and m.upper() not in ['NAN', 'NONE', 'UNKNOWN', '']
@@ -980,11 +988,23 @@ try:
         if list_kategori_mesin:
             pilih_kat_mesin = st.selectbox("🔍 Pilih Jenis / Kategori Mesin:", list_kategori_mesin, key="sb_kat_mesin_tab5")
 
-            # 2. Gabungkan log OEE & SIC untuk periode filter aktif
-            logs_oee = df_oee[['NAMA_MESIN', 'NO_MESIN_LINE', 'TIMESTAMP', 'NO_BATCH', 'CAPAIN_PRODUKSI_PCS']].rename(
+            # 2. Persiapkan DF aman yang menjamin ketersediaan kolom NO_MESIN_LINE & OUTPUT_PCS
+            df_oee_tab5 = df_oee.copy()
+            if 'NO_MESIN_LINE' not in df_oee_tab5.columns:
+                df_oee_tab5['NO_MESIN_LINE'] = ''
+            if 'CAPAIN_PRODUKSI_PCS' not in df_oee_tab5.columns:
+                df_oee_tab5['CAPAIN_PRODUKSI_PCS'] = 0
+
+            df_sic_tab5 = df_sic.copy()
+            if 'NO_MESIN_LINE' not in df_sic_tab5.columns:
+                df_sic_tab5['NO_MESIN_LINE'] = ''
+            if 'OUTPUT_PCS' not in df_sic_tab5.columns:
+                df_sic_tab5['OUTPUT_PCS'] = 0
+
+            logs_oee = df_oee_tab5[['NAMA_MESIN', 'NO_MESIN_LINE', 'TIMESTAMP', 'NO_BATCH', 'CAPAIN_PRODUKSI_PCS']].rename(
                 columns={'CAPAIN_PRODUKSI_PCS': 'OUTPUT_PCS'}
             )
-            logs_sic = df_sic[['NAMA_MESIN', 'NO_MESIN_LINE', 'TIMESTAMP', 'NO_BATCH', 'OUTPUT_PCS']]
+            logs_sic = df_sic_tab5[['NAMA_MESIN', 'NO_MESIN_LINE', 'TIMESTAMP', 'NO_BATCH', 'OUTPUT_PCS']]
             
             df_all_logs = pd.concat([logs_oee, logs_sic], ignore_index=True)
             df_all_logs['NAMA_MESIN_CLEAN'] = df_all_logs['NAMA_MESIN'].astype(str).str.strip().str.title()
@@ -995,8 +1015,16 @@ try:
             df_selected_kat = df_all_logs[df_all_logs['NAMA_MESIN_CLEAN'] == pilih_kat_mesin].copy()
 
             # 3. Ambil seluruh daftar Line unik dari dataset full untuk kategori mesin yang dipilih
-            full_oee_lines = df_oee_full[df_oee_full['NAMA_MESIN'].astype(str).str.strip().str.title() == pilih_kat_mesin]['NO_MESIN_LINE'].apply(format_line_number)
-            full_sic_lines = df_sic_full[df_sic_full['NAMA_MESIN'].astype(str).str.strip().str.title() == pilih_kat_mesin]['NO_MESIN_LINE'].apply(format_line_number)
+            df_oee_full_tab5 = df_oee_full.copy()
+            if 'NO_MESIN_LINE' not in df_oee_full_tab5.columns:
+                df_oee_full_tab5['NO_MESIN_LINE'] = ''
+            
+            df_sic_full_tab5 = df_sic_full.copy()
+            if 'NO_MESIN_LINE' not in df_sic_full_tab5.columns:
+                df_sic_full_tab5['NO_MESIN_LINE'] = ''
+
+            full_oee_lines = df_oee_full_tab5[df_oee_full_tab5['NAMA_MESIN'].astype(str).str.strip().str.title() == pilih_kat_mesin]['NO_MESIN_LINE'].apply(format_line_number)
+            full_sic_lines = df_sic_full_tab5[df_sic_full_tab5['NAMA_MESIN'].astype(str).str.strip().str.title() == pilih_kat_mesin]['NO_MESIN_LINE'].apply(format_line_number)
             
             all_known_lines = sorted(list(set(pd.concat([full_oee_lines, full_sic_lines]).unique())))
 
