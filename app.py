@@ -1094,7 +1094,7 @@ try:
         st.markdown("---")
         col_wip1, col_wip2 = st.columns([3, 2])
 
-        with col_wip1:
+with col_wip1:
     st.markdown("### 📋 Tabel WIP Operasional (Tracking Batch)")
     df_wip_res = get_wip_operational(df_sic, df_oee)
     
