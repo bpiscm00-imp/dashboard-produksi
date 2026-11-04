@@ -1095,22 +1095,30 @@ try:
         col_wip1, col_wip2 = st.columns([3, 2])
 
         with col_wip1:
-            st.markdown("### 📋 Tabel WIP Operasional (Tracking Batch)")
-            df_wip_res = get_wip_operational(df_sic, df_oee)
-            if not df_wip_res.empty:
-                col_pcs = [c for c in df_wip_res.columns if '(Pcs)' in c]
-                for c in col_pcs:
-                    df_wip_res[c] = pd.to_numeric(df_wip_res[c], errors='coerce').fillna(0)
-                
-                group_cols = [c for c in ['No Batch', 'Subbrand', 'Mulai (Tgl & Jam)'] if c in df_wip_res.columns]
-                if group_cols:
-                    df_wip_sum = df_wip_res.groupby(group_cols, as_index=False)[col_pcs].sum()
-                else:
-                    df_wip_sum = df_wip_res
+    st.markdown("### 📋 Tabel WIP Operasional (Tracking Batch)")
+    df_wip_res = get_wip_operational(df_sic, df_oee)
+    
+    if not df_wip_res.empty:
+        def highlight_selisih(val):
+            if isinstance(val, (int, float)) and val > 0:
+                return 'background-color: #5c2c16; color: #ffcc80;'
+            elif isinstance(val, (int, float)) and val < 0:
+                return 'background-color: #4a1212; color: #ef9a9a;'
+            return ''
 
-                st.dataframe(df_wip_sum, use_container_width=True, height=400)
-            else:
-                st.info("Data WIP Operasional tidak ditemukan pada periode ini.")
+        st.dataframe(
+            df_wip_res.style.applymap(highlight_selisih, subset=['Selisih (FP vs Packing) (Pcs)'])
+            .format({
+                'Proses 1 - Mixing (Kg)': '{:,.2f} Kg',
+                'Proses 2 - Filling/Press (Pcs)': '{:,.0f} Pcs',
+                'Proses 3 - Packing (Pcs)': '{:,.0f} Pcs',
+                'Selisih (FP vs Packing) (Pcs)': '{:,.0f} Pcs'
+            }),
+            use_container_width=True,
+            height=450
+        )
+    else:
+        st.info("Data WIP Operasional tidak ditemukan pada periode ini.")
 
         with col_wip2:
             st.markdown("### ⏱️ Age Mixing (Aging Ruahan Ke Filling)")
