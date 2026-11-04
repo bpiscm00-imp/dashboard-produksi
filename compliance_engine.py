@@ -649,85 +649,125 @@ def get_daily_compliance_trend(df_oee, df_sic, df_qc, start_date_str, end_date_s
 
 def get_wip_operational(df_sic, df_oee):
     """
-    Mengolah data tracking WIP Operasional per No Batch:
-    No Batch | Subbrand | Tanggal/Jam Mulai | Proses 1 (Output) | Proses 2 (Output) | Proses 3 (Output)
+    Tracking WIP Operasional per Batch:
+    1. Mulai & Output Mixing dalam KG (Excluding Proses Timbang).
+    2. Output Kumulatif Filling/Press (FP) (Pcs).
+    3. Output Kumulatif Packing (Pcs).
+    4. Hitungan Durasi Perpindahan (Mixing -> FP, FP -> Packing, Total Lead Time).
+    5. Selisih Output (FP vs Packing) (Pcs).
     """
-    if df_sic.empty and df_oee.empty:
-        return pd.DataFrame()
+    # 1. Standarisasi Log Data SIC & OEE
+    logs_sic = df_sic[['TIMESTAMP', 'NO_BATCH', 'NAMA_MESIN', 'SUBBRAND_MASTER', 'OUTPUT_PCS']].copy() if not df_sic.empty else pd.DataFrame()
     
-    # Gabungkan log transaksi SIC dan OEE
-    combined = []
-    
-    if not df_sic.empty:
-        for _, r in df_sic.iterrows():
-            b = str(r.get('NO_BATCH', '')).strip()
-            if b and b.upper() not in ['NAN', 'NONE', '']:
-                combined.append({
-                    'NO_BATCH': b,
-                    'SUBBRAND': r.get('SUBBRAND_MASTER', r.get('SUBBRAND', '-')),
-                    'TIMESTAMP': r.get('TIMESTAMP'),
-                    'NAMA_MESIN': str(r.get('NAMA_MESIN', '')),
-                    'OUTPUT': pd.to_numeric(r.get('OUTPUT_PCS', 0), errors='coerce') or 0
-                })
-                
-    if not df_oee.empty:
-        for _, r in df_oee.iterrows():
-            b = str(r.get('NO_BATCH', '')).strip()
-            if b and b.upper() not in ['NAN', 'NONE', '']:
-                combined.append({
-                    'NO_BATCH': b,
-                    'SUBBRAND': r.get('SUBBRAND_MASTER', r.get('VARIAN_PRODUK', '-')),
-                    'TIMESTAMP': r.get('TIMESTAMP'),
-                    'NAMA_MESIN': str(r.get('NAMA_MESIN', r.get('PROSES', ''))),
-                    'OUTPUT': pd.to_numeric(r.get('CAPAIN_PRODUKSI_PCS', 0), errors='coerce') or 0
-                })
+    logs_oee = df_oee[['TIMESTAMP', 'NO_BATCH', 'NAMA_MESIN', 'SUBBRAND_MASTER', 'CAPAIN_PRODUKSI_PCS']].rename(
+        columns={'CAPAIN_PRODUKSI_PCS': 'OUTPUT_PCS'}
+    ).copy() if not df_oee.empty else pd.DataFrame()
 
-    df_comb = pd.DataFrame(combined)
-    if df_comb.empty:
+    df_all = pd.concat([logs_sic, logs_oee], ignore_index=True)
+    if df_all.empty:
         return pd.DataFrame()
 
-    df_comb['TIMESTAMP'] = pd.to_datetime(df_comb['TIMESTAMP'], errors='coerce')
-    df_comb = df_comb.dropna(subset=['TIMESTAMP'])
+    # Cleansing awal
+    df_all['NO_BATCH'] = df_all['NO_BATCH'].astype(str).str.strip()
+    df_all['NAMA_MESIN'] = df_all['NAMA_MESIN'].astype(str).str.strip().str.upper()
+    df_all['OUTPUT_PCS'] = pd.to_numeric(df_all['OUTPUT_PCS'], errors='coerce').fillna(0)
+    df_all['TIMESTAMP'] = pd.to_datetime(df_all['TIMESTAMP'], errors='coerce')
+    
+    # Filter batch valid
+    df_all = df_all[~df_all['NO_BATCH'].isin(['', '-', 'NAN', 'NONE', '<NA>'])].dropna(subset=['TIMESTAMP'])
+    df_all = df_all.sort_values(by=['NO_BATCH', 'TIMESTAMP'])
 
-    # Pengelompokan Kategori Proses
-    def categorize_process(mesin):
-        m = str(mesin).upper()
-        if any(x in m for x in ['TIMBANG', 'MIXING', 'MO', 'MS', 'TR', 'TRIROLER']):
-            return 'Proses 1 (Timbang/Mixing)'
-        elif any(x in m for x in ['FILLING', 'FO', 'FM', 'PRESS']):
-            return 'Proses 2 (Filling/Press)'
-        elif any(x in m for x in ['PACKING', 'PL', 'KEMAS']):
-            return 'Proses 3 (Packing)'
-        return 'Proses Lainnya'
+    # 2. Pengelompokan Kategori Proses (Exclude Timbang)
+    def kat_proses(nama_mesin):
+        m = str(nama_mesin).upper()
+        if 'TIMBANG' in m:
+            return 'EXCLUDE'  # Abaikan proses timbang
+        elif any(x in m for x in ['MIXING', 'MO', 'MS']):
+            return 'MIXING'
+        elif any(x in m for x in ['FILLING', 'PRESS', 'FO', 'FM']):
+            return 'FILLING_PRESS'
+        elif any(x in m for x in ['PACKING', 'PACK', 'KEMAS']):
+            return 'PACKING'
+        return 'OTHER'
 
-    df_comb['KAT_PROSES'] = df_comb['NAMA_MESIN'].apply(categorize_process)
+    df_all['KATEGORI_PROSES'] = df_all['NAMA_MESIN'].apply(kat_proses)
+    
+    # Filter buang log Timbang
+    df_all = df_all[df_all['KATEGORI_PROSES'] != 'EXCLUDE'].copy()
 
-    wip_rows = []
-    for batch_no, group in df_comb.groupby('NO_BATCH'):
-        subbrand = group['SUBBRAND'].iloc[0]
-        min_ts = group['TIMESTAMP'].min()
-        
-        tgl_jam_mulai = min_ts.strftime('%d/%m/%Y %H:%M') if pd.notna(min_ts) else '-'
-        
-        p1_out = group[group['KAT_PROSES'] == 'Proses 1 (Timbang/Mixing)']['OUTPUT'].sum()
-        p2_out = group[group['KAT_PROSES'] == 'Proses 2 (Filling/Press)']['OUTPUT'].sum()
-        p3_out = group[group['KAT_PROSES'] == 'Proses 3 (Packing)']['OUTPUT'].sum()
-        
-        wip_rows.append({
-            'No Batch': batch_no,
+    # 3. Pengolahan Data per Batch
+    wip_records = []
+    
+    for no_batch, group in df_all.groupby('NO_BATCH'):
+        subbrand_series = group['SUBBRAND_MASTER'].replace({'UNKNOWN': np.nan, '': np.nan}).dropna()
+        subbrand = subbrand_series.iloc[0] if not subbrand_series.empty else '-'
+
+        g_mix = group[group['KATEGORI_PROSES'] == 'MIXING']
+        g_fp = group[group['KATEGORI_PROSES'] == 'FILLING_PRESS']
+        g_pack = group[group['KATEGORI_PROSES'] == 'PACKING']
+
+        # --- A. PROSES 1: MIXING (Satuan Kg) ---
+        ts_mix_start = g_mix['TIMESTAMP'].min() if not g_mix.empty else pd.NaT
+        out_mix_kg = 0.0
+        if not g_mix.empty:
+            valid_mix_out = g_mix[g_mix['OUTPUT_PCS'] > 0]['OUTPUT_PCS']
+            out_mix_kg = float(valid_mix_out.iloc[-1]) if not valid_mix_out.empty else float(g_mix['OUTPUT_PCS'].iloc[-1])
+
+        # --- B. PROSES 2: FILLING / PRESS (Satuan Pcs) ---
+        ts_fp_start = g_fp['TIMESTAMP'].min() if not g_fp.empty else pd.NaT
+        out_fp_kumulatif = g_fp['OUTPUT_PCS'].sum() if not g_fp.empty else 0
+
+        # --- C. PROSES 3: PACKING (Satuan Pcs) ---
+        ts_pack_start = g_pack['TIMESTAMP'].min() if not g_pack.empty else pd.NaT
+        out_pack_kumulatif = g_pack['OUTPUT_PCS'].sum() if not g_pack.empty else 0
+
+        # --- D. KALKULASI DURASI PERPINDAHAN PROSES ---
+        # 1. Durasi Mixing -> FP
+        durasi_mix_fp_str = "-"
+        if pd.notna(ts_mix_start) and pd.notna(ts_fp_start):
+            diff_sec = (ts_fp_start - ts_mix_start).total_seconds()
+            if diff_sec >= 0:
+                hours = int(diff_sec // 3600)
+                mins = int((diff_sec % 3600) // 60)
+                durasi_mix_fp_str = f"{hours}j {mins}m" if hours > 0 else f"{mins}m"
+
+        # 2. Durasi FP -> Packing
+        durasi_fp_pack_str = "-"
+        if pd.notna(ts_fp_start) and pd.notna(ts_pack_start):
+            diff_sec = (ts_pack_start - ts_fp_start).total_seconds()
+            if diff_sec >= 0:
+                hours = int(diff_sec // 3600)
+                mins = int((diff_sec % 3600) // 60)
+                durasi_fp_pack_str = f"{hours}j {mins}m" if hours > 0 else f"{mins}m"
+
+        # 3. Total Lead Time
+        ts_first = group['TIMESTAMP'].min()
+        ts_last = group['TIMESTAMP'].max()
+        durasi_total_str = "-"
+        if pd.notna(ts_first) and pd.notna(ts_last):
+            diff_sec = (ts_last - ts_first).total_seconds()
+            hours = int(diff_sec // 3600)
+            mins = int((diff_sec % 3600) // 60)
+            durasi_total_str = f"{hours}j {mins}m" if hours > 0 else f"{mins}m"
+
+        # --- E. SELISIH OUTPUT (FP vs PACKING) ---
+        selisih_fp_pack = out_fp_kumulatif - out_pack_kumulatif
+        mulai_tgl_jam = ts_mix_start.strftime('%d/%m/%Y %H:%M') if pd.notna(ts_mix_start) else ts_first.strftime('%d/%m/%Y %H:%M')
+
+        wip_records.append({
+            'No Batch': no_batch,
             'Subbrand': subbrand,
-            'Mulai (Tgl & Jam)': tgl_jam_mulai,
-            'Proses 1 - Timbang/Mixing (Pcs)': f"{p1_out:,.0f}",
-            'Proses 2 - Filling/Press (Pcs)': f"{p2_out:,.0f}",
-            'Proses 3 - Packing (Pcs)': f"{p3_out:,.0f}",
-            '_raw_ts': min_ts
+            'Mulai Mixing (Tgl & Jam)': mulai_tgl_jam,
+            'Proses 1 - Mixing (Kg)': out_mix_kg,
+            'Durasi (Mixing ➔ FP)': durasi_mix_fp_str,
+            'Proses 2 - Filling/Press (Pcs)': out_fp_kumulatif,
+            'Durasi (FP ➔ Packing)': durasi_fp_pack_str,
+            'Proses 3 - Packing (Pcs)': out_pack_kumulatif,
+            'Selisih (FP vs Packing) (Pcs)': selisih_fp_pack,
+            'Total Lead Time': durasi_total_str
         })
 
-    df_wip = pd.DataFrame(wip_rows)
-    if not df_wip.empty:
-        df_wip = df_wip.sort_values(by='_raw_ts', ascending=False).drop(columns=['_raw_ts'])
-    
-    return df_wip
+    return pd.DataFrame(wip_records)
 
 def get_age_mixing(df_sic, df_oee):
     """
