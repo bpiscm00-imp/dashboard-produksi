@@ -1094,31 +1094,37 @@ try:
         st.markdown("---")
         col_wip1, col_wip2 = st.columns([3, 2])
 
-    with col_wip1:
-        st.markdown("### 📋 Tabel WIP Operasional (Tracking Batch)")
-        df_wip_res = get_wip_operational(df_sic, df_oee)
-    
-        if not df_wip_res.empty:
-            def highlight_selisih(val):
-                if isinstance(val, (int, float)) and val > 0:
-                    return 'background-color: #5c2c16; color: #ffcc80;'
-                elif isinstance(val, (int, float)) and val < 0:
-                    return 'background-color: #4a1212; color: #ef9a9a;'
-                return ''
+        with col_wip1:
+            st.markdown("### 📋 Tabel WIP Operasional (Tracking Batch)")
+            df_wip_res = get_wip_operational(df_sic, df_oee)
+            
+            if not df_wip_res.empty:
+                def highlight_selisih(val):
+                    if isinstance(val, (int, float)) and val > 0:
+                        return 'background-color: #5c2c16; color: #ffcc80;'
+                    elif isinstance(val, (int, float)) and val < 0:
+                        return 'background-color: #4a1212; color: #ef9a9a;'
+                    return ''
 
-            st.dataframe(
-                df_wip_res.style.applymap(highlight_selisih, subset=['Selisih (FP vs Packing) (Pcs)'])
-                .format({
-                    'Proses 1 - Mixing (Kg)': '{:,.2f} Kg',
-                    'Proses 2 - Filling/Press (Pcs)': '{:,.0f} Pcs',
-                    'Proses 3 - Packing (Pcs)': '{:,.0f} Pcs',
-                    'Selisih (FP vs Packing) (Pcs)': '{:,.0f} Pcs'
-                }),
-                use_container_width=True,
-                height=450
-            )
-        else:
-            st.info("Data WIP Operasional tidak ditemukan pada periode ini.")
+                # Penanganan safe-call agar kompatibel dengan Pandas .map() / .applymap()
+                styler_wip = df_wip_res.style
+                if hasattr(styler_wip, 'map'):
+                    styler_wip = styler_wip.map(highlight_selisih, subset=['Selisih (FP vs Packing) (Pcs)'])
+                else:
+                    styler_wip = styler_wip.applymap(highlight_selisih, subset=['Selisih (FP vs Packing) (Pcs)'])
+
+                st.dataframe(
+                    styler_wip.format({
+                        'Proses 1 - Mixing (Kg)': '{:,.2f} Kg',
+                        'Proses 2 - Filling/Press (Pcs)': '{:,.0f} Pcs',
+                        'Proses 3 - Packing (Pcs)': '{:,.0f} Pcs',
+                        'Selisih (FP vs Packing) (Pcs)': '{:,.0f} Pcs'
+                    }),
+                    use_container_width=True,
+                    height=450
+                )
+            else:
+                st.info("Data WIP Operasional tidak ditemukan pada periode ini.")
 
         with col_wip2:
             st.markdown("### ⏱️ Age Mixing (Aging Ruahan Ke Filling)")
@@ -1129,10 +1135,16 @@ try:
                         return 'background-color: #7f1d1d; color: white;'
                     return ''
                 
+                styler_age = df_age_res.style
+                if hasattr(styler_age, 'map'):
+                    styler_age = styler_age.map(highlight_aging, subset=['Umur Ruahan (Jam)'])
+                else:
+                    styler_age = styler_age.applymap(highlight_aging, subset=['Umur Ruahan (Jam)'])
+
                 st.dataframe(
-                    df_age_res.style.applymap(highlight_aging, subset=['Umur Ruahan (Jam)']),
+                    styler_age,
                     use_container_width=True, 
-                    height=400
+                    height=450
                 )
             else:
                 st.info("Data Age Mixing tidak ditemukan pada periode ini.")
