@@ -1094,31 +1094,31 @@ try:
         st.markdown("---")
         col_wip1, col_wip2 = st.columns([3, 2])
 
-with col_wip1:
-    st.markdown("### 📋 Tabel WIP Operasional (Tracking Batch)")
-    df_wip_res = get_wip_operational(df_sic, df_oee)
+    with col_wip1:
+        st.markdown("### 📋 Tabel WIP Operasional (Tracking Batch)")
+        df_wip_res = get_wip_operational(df_sic, df_oee)
     
-    if not df_wip_res.empty:
-        def highlight_selisih(val):
-            if isinstance(val, (int, float)) and val > 0:
-                return 'background-color: #5c2c16; color: #ffcc80;'
-            elif isinstance(val, (int, float)) and val < 0:
-                return 'background-color: #4a1212; color: #ef9a9a;'
-            return ''
+        if not df_wip_res.empty:
+            def highlight_selisih(val):
+                if isinstance(val, (int, float)) and val > 0:
+                    return 'background-color: #5c2c16; color: #ffcc80;'
+                elif isinstance(val, (int, float)) and val < 0:
+                    return 'background-color: #4a1212; color: #ef9a9a;'
+                return ''
 
-        st.dataframe(
-            df_wip_res.style.applymap(highlight_selisih, subset=['Selisih (FP vs Packing) (Pcs)'])
-            .format({
-                'Proses 1 - Mixing (Kg)': '{:,.2f} Kg',
-                'Proses 2 - Filling/Press (Pcs)': '{:,.0f} Pcs',
-                'Proses 3 - Packing (Pcs)': '{:,.0f} Pcs',
-                'Selisih (FP vs Packing) (Pcs)': '{:,.0f} Pcs'
-            }),
-            use_container_width=True,
-            height=450
-        )
-    else:
-        st.info("Data WIP Operasional tidak ditemukan pada periode ini.")
+            st.dataframe(
+                df_wip_res.style.applymap(highlight_selisih, subset=['Selisih (FP vs Packing) (Pcs)'])
+                .format({
+                    'Proses 1 - Mixing (Kg)': '{:,.2f} Kg',
+                    'Proses 2 - Filling/Press (Pcs)': '{:,.0f} Pcs',
+                    'Proses 3 - Packing (Pcs)': '{:,.0f} Pcs',
+                    'Selisih (FP vs Packing) (Pcs)': '{:,.0f} Pcs'
+                }),
+                use_container_width=True,
+                height=450
+            )
+        else:
+            st.info("Data WIP Operasional tidak ditemukan pada periode ini.")
 
         with col_wip2:
             st.markdown("### ⏱️ Age Mixing (Aging Ruahan Ke Filling)")
