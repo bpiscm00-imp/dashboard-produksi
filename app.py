@@ -14,8 +14,8 @@ from compliance_engine import (
     build_wa_msg_operator,
     build_wa_msg_qc,
     is_qc_status_patuh,
-    get_wip_operational,
-    get_age_mixing
+    get_wip_operational as raw_get_wip_operational,
+    get_age_mixing as raw_get_age_mixing
 )
 
 st.set_page_config(page_title="Dashboard Produksi & Kepatuhan", layout="wide")
@@ -35,7 +35,7 @@ def init_connection():
         creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
     return gspread.authorize(creds)
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_data():
     client = init_connection()
     sheet = client.open("Raw Data - Produksi - Cleansing") 
@@ -48,9 +48,28 @@ def load_data():
     return df_qc, df_sic, df_oee, df_target
 
 # ==========================================
-# 2. CLEANSING & PIPELINE PENGOLAHAN DATA
+# 2. CACHING FUNGSI KOMPUTASI BERAT ENGINE
 # ==========================================
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_get_wip_operational(df_sic, df_oee):
+    return raw_get_wip_operational(df_sic, df_oee)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_get_age_mixing(df_sic, df_oee):
+    return raw_get_age_mixing(df_sic, df_oee)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_get_rapport_cards_range(df_oee, df_sic, df_qc, start_date, end_date):
+    return get_rapport_cards_range(df_oee, df_sic, df_qc, start_date, end_date)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_get_daily_compliance_trend(df_oee, df_sic, df_qc, start_date, end_date):
+    return get_daily_compliance_trend(df_oee, df_sic, df_qc, start_date, end_date)
+
+# ==========================================
+# 3. CLEANSING & PIPELINE PENGOLAHAN DATA
+# ==========================================
+@st.cache_data(ttl=3600, show_spinner=False)
 def clean_data(df_qc, df_sic, df_oee):
     for df in [df_qc, df_sic, df_oee]:
         # Penanganan fallback jika kolom NO_MESIN_LINE belum ada di data mentah sheet
@@ -159,7 +178,7 @@ def clean_data(df_qc, df_sic, df_oee):
     return df_qc, df_sic_bersih, df_oee, df_sic_anomali_double, df_anomali_batch
 
 # ==========================================
-# 3. HELPER FUNCTIONS
+# 4. HELPER FUNCTIONS
 # ==========================================
 def format_line_number(val):
     if pd.isna(val) or str(val).strip() in ['', 'nan', 'NaN', 'None', '-']:
@@ -207,12 +226,12 @@ def calc_gross_per_jam(row):
         return float(gross_pcs) / operating_hours
 
 # ==========================================
-# 4. EKSEKUSI TAMPILAN DASHBOARD
+# 5. EKSEKUSI TAMPILAN DASHBOARD
 # ==========================================
 st.title("🏭 Dashboard Cerdas Produksi, QC & Kepatuhan")
 
 try:
-    with st.spinner("Menarik dan membersihkan data dari Google Sheets..."):
+    with st.spinner("Memuat data produksi..."):
         raw_qc, raw_sic, raw_oee, df_target = load_data()
         df_qc, df_sic, df_oee, df_anomali_double, df_anomali_batch = clean_data(raw_qc, raw_sic, raw_oee)
 
@@ -220,9 +239,13 @@ try:
     df_sic_full = df_sic.copy()
     df_oee_full = df_oee.copy()
 
-    # FILTER GLOBAL TANGGAL
+    # FILTER GLOBAL TANGGAL & REFRESH MANUAL
     st.sidebar.header("Filter Data Global")
     
+    if st.sidebar.button("🔄 Sync / Refresh Data Terkini", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
     all_dates = pd.concat([df_qc['TIMESTAMP'], df_sic['TIMESTAMP'], df_oee['TIMESTAMP']]).dropna()
     min_date = all_dates.min()
     max_date = all_dates.max()
@@ -664,12 +687,12 @@ try:
 
         q_col1, q_col2, q_col3, q_col4 = st.columns(4)
         q_col1.metric("Total Reject (QC)", f"{tot_reject:,.0f} Pcs")
-        q_col2.metric("Total Repproses (QC)", f"{tot_reproses:,.0f} Pcs")
+        q_col2.metric("Total Reproses (QC)", f"{tot_reproses:,.0f} Pcs")
         q_col3.metric("Total Defect (QC)", f"{(tot_reject + tot_reproses):,.0f} Pcs")
         q_col4.metric("Overall Quality Rate", f"{overall_quality:.2f} %")
 
         st.markdown("---")
-        st.markdown("### 📈 Tren Bulanan Reject Rate & Repproses Rate (Keseluruhan Periode Data)")
+        st.markdown("### 📈 Tren Bulanan Reject Rate & Reproses Rate (Keseluruhan Periode Data)")
         
         df_qc_temp_full = df_qc_full.copy()
         df_qc_temp_full['NO_BATCH_KEY'] = df_qc_temp_full['NO_BATCH'].astype(str).str.strip()
@@ -846,8 +869,8 @@ try:
                 end_trend_str = end_audit_str
                 judul_trend = f"Tren Kepatuhan Harian ({periode_judul})"
 
-        with st.spinner("Menganalisis Kepatuhan 3-Form (OEE, SIC, QC)..."):
-            compliance_res = get_rapport_cards_range(df_oee_full, df_sic_full, df_qc_full, start_audit_str, end_audit_str)
+        # Penggunaan versi cached_get_rapport_cards_range untuk mempercepat audit
+        compliance_res = cached_get_rapport_cards_range(df_oee_full, df_sic_full, df_qc_full, start_audit_str, end_audit_str)
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Kepatuhan Dept OEE - SIC", compliance_res['skorDeptOEESIC'])
@@ -857,8 +880,8 @@ try:
         st.markdown("---")
         st.markdown(f"### 📈 {judul_trend}")
         
-        with st.spinner("Memuat tren kepatuhan..."):
-            df_daily_trend = get_daily_compliance_trend(df_oee_full, df_sic_full, df_qc_full, start_trend_str, end_trend_str)
+        # Penggunaan versi cached_get_daily_compliance_trend untuk grafik tren
+        df_daily_trend = cached_get_daily_compliance_trend(df_oee_full, df_sic_full, df_qc_full, start_trend_str, end_trend_str)
 
         if not df_daily_trend.empty:
             df_trend_melted = df_daily_trend.melt(
@@ -974,7 +997,6 @@ try:
         
         st.markdown("### 📊 Status Operasional Line Mesin (Periode Filter)")
         
-        # 1. Ambil & bersihkan daftar Kategori/Jenis Mesin valid
         raw_m_oee = df_oee_full['NAMA_MESIN'].dropna().astype(str).str.strip().str.title().unique()
         raw_m_sic = df_sic_full['NAMA_MESIN'].dropna().astype(str).str.strip().str.title().unique()
         
@@ -988,7 +1010,6 @@ try:
         if list_kategori_mesin:
             pilih_kat_mesin = st.selectbox("🔍 Pilih Jenis / Kategori Mesin:", list_kategori_mesin, key="sb_kat_mesin_tab5")
 
-            # 2. Persiapkan DF aman yang menjamin ketersediaan kolom NO_MESIN_LINE & OUTPUT_PCS
             df_oee_tab5 = df_oee.copy()
             if 'NO_MESIN_LINE' not in df_oee_tab5.columns:
                 df_oee_tab5['NO_MESIN_LINE'] = ''
@@ -1011,10 +1032,8 @@ try:
             df_all_logs['OUTPUT_PCS'] = pd.to_numeric(df_all_logs['OUTPUT_PCS'], errors='coerce').fillna(0)
             df_all_logs['LINE_DISPLAY'] = df_all_logs['NO_MESIN_LINE'].apply(format_line_number)
 
-            # Filter data khusus untuk kategori mesin yang dipilih
             df_selected_kat = df_all_logs[df_all_logs['NAMA_MESIN_CLEAN'] == pilih_kat_mesin].copy()
 
-            # 3. Ambil seluruh daftar Line unik dari dataset full untuk kategori mesin yang dipilih
             df_oee_full_tab5 = df_oee_full.copy()
             if 'NO_MESIN_LINE' not in df_oee_full_tab5.columns:
                 df_oee_full_tab5['NO_MESIN_LINE'] = ''
@@ -1096,7 +1115,8 @@ try:
 
         with col_wip1:
             st.markdown("### 📋 Tabel WIP Operasional (Tracking Batch)")
-            df_wip_res = get_wip_operational(df_sic, df_oee)
+            # Memanggil versi cached_get_wip_operational
+            df_wip_res = cached_get_wip_operational(df_sic, df_oee)
             
             if not df_wip_res.empty:
                 def highlight_selisih(val):
@@ -1106,7 +1126,6 @@ try:
                         return 'background-color: #4a1212; color: #ef9a9a;'
                     return ''
 
-                # Penanganan safe-call agar kompatibel dengan Pandas .map() / .applymap()
                 styler_wip = df_wip_res.style
                 if hasattr(styler_wip, 'map'):
                     styler_wip = styler_wip.map(highlight_selisih, subset=['Selisih (FP vs Packing) (Pcs)'])
@@ -1128,7 +1147,8 @@ try:
 
         with col_wip2:
             st.markdown("### ⏱️ Age Mixing (Aging Ruahan Ke Filling)")
-            df_age_res = get_age_mixing(df_sic, df_oee)
+            # Memanggil versi cached_get_age_mixing
+            df_age_res = cached_get_age_mixing(df_sic, df_oee)
             if not df_age_res.empty:
                 def highlight_aging(val):
                     if isinstance(val, (int, float)) and val > 24.0:
