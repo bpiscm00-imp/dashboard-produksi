@@ -35,7 +35,7 @@ def init_connection():
         creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
     return gspread.authorize(creds)
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=3600)
 def load_data():
     client = init_connection()
     sheet = client.open("Raw Data - Produksi - Cleansing") 
@@ -50,7 +50,7 @@ def load_data():
 # ==========================================
 # 2. CLEANSING & PIPELINE PENGOLAHAN DATA
 # ==========================================
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=3600)
 def clean_data(df_qc, df_sic, df_oee):
     for df in [df_qc, df_sic, df_oee]:
         # Penanganan fallback jika kolom NO_MESIN_LINE belum ada di data mentah sheet
