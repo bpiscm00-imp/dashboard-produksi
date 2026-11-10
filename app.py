@@ -27,12 +27,10 @@ conn = st.connection("postgres", type="sql")
 def load_data_from_supabase(start_date, end_date):
     """
     Menarik data dari Supabase PostgreSQL dengan Server-Side Date Filtering.
-    Menggunakan SQL Alias agar nama kolom otomatis terkonversi ke uppercase standard.
     """
     start_str = f"{start_date} 00:00:00"
     end_str = f"{end_date} 23:59:59"
 
-    # Query OEE
     query_oee = """
         SELECT 
             timestamp AS "TIMESTAMP",
@@ -59,7 +57,6 @@ def load_data_from_supabase(start_date, end_date):
         ORDER BY timestamp ASC;
     """
 
-    # Query SIC
     query_sic = """
         SELECT 
             timestamp AS "TIMESTAMP",
@@ -78,7 +75,6 @@ def load_data_from_supabase(start_date, end_date):
         ORDER BY timestamp ASC;
     """
 
-    # Query QC
     query_qc = """
         SELECT 
             timestamp AS "TIMESTAMP",
@@ -110,8 +106,7 @@ def load_data_from_supabase(start_date, end_date):
 @st.cache_data(ttl=300, show_spinner=False)
 def load_all_data_for_monthly_qc():
     """
-    Menarik seluruh data historical (tanpa filter tanggal) 
-    khusus untuk grafik Tren Bulanan Reject & Reproses Rate di Tab 2.
+    Menarik seluruh data historical khusus untuk grafik Tren Bulanan Tab 2.
     """
     query_oee_full = 'SELECT timestamp AS "TIMESTAMP", no_batch AS "NO_BATCH", nama_mesin AS "NAMA_MESIN", no_mesin_line AS "NO_MESIN_LINE", mesin_full AS "MESIN_FULL", capain_produksi_pcs AS "CAPAIN_PRODUKSI_PCS" FROM t_oee_logs;'
     query_qc_full = 'SELECT timestamp AS "TIMESTAMP", no_batch AS "NO_BATCH", nama_mesin AS "NAMA_MESIN", no_mesin_line AS "NO_MESIN_LINE", reject_pcs AS "REJECT_PCS", reproses_pcs AS "REPROSES_PCS" FROM t_qc_logs;'
@@ -122,7 +117,7 @@ def load_all_data_for_monthly_qc():
         
         df_oee_f['TIMESTAMP'] = pd.to_datetime(df_oee_f['TIMESTAMP'], errors='coerce')
         df_qc_f['TIMESTAMP'] = pd.to_datetime(df_qc_f['TIMESTAMP'], errors='coerce')
-        return df_qc_f, df_oee_f
+        return df_qc_f.reset_index(drop=True), df_oee_f.reset_index(drop=True)
     except Exception:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -150,6 +145,11 @@ def cached_get_daily_compliance_trend(df_oee, df_sic, df_qc, start_date, end_dat
 # ==========================================
 @st.cache_data(ttl=300, show_spinner=False)
 def clean_data(df_qc, df_sic, df_oee):
+    # Pastikan setiap DataFrame memiliki RangeIndex murni (0..N)
+    df_qc = df_qc.reset_index(drop=True)
+    df_sic = df_sic.reset_index(drop=True)
+    df_oee = df_oee.reset_index(drop=True)
+
     for df in [df_qc, df_sic, df_oee]:
         if 'NO_MESIN_LINE' not in df.columns:
             if 'MESIN_FULL' in df.columns:
@@ -188,14 +188,15 @@ def clean_data(df_qc, df_sic, df_oee):
         df_qc[['TIMESTAMP', 'NAMA_MESIN', 'NO_BATCH_CLEAN']].dropna(),
         df_sic[['TIMESTAMP', 'NAMA_MESIN', 'NO_BATCH_CLEAN']].dropna(),
         df_oee[['TIMESTAMP', 'NAMA_MESIN', 'NO_BATCH_CLEAN']].dropna()
-    ])
+    ], ignore_index=True)
     valid_batches['TANGGAL'] = valid_batches['TIMESTAMP'].dt.date
     
     ref_batch = valid_batches.groupby(['TANGGAL', 'NAMA_MESIN'])['NO_BATCH_CLEAN'].agg(lambda x: x.mode()[0] if not x.mode().empty else np.nan).to_dict()
 
     for df in [df_qc, df_sic, df_oee]:
         df['TANGGAL_TEMP'] = df['TIMESTAMP'].dt.date
-        df['BATCH_FILLED'] = df.set_index(['TANGGAL_TEMP', 'NAMA_MESIN']).index.map(ref_batch)
+        # Menggunakan List Comprehension aman tanpa re-index alignment MultiIndex:
+        df['BATCH_FILLED'] = [ref_batch.get((t, m), np.nan) for t, m in zip(df['TANGGAL_TEMP'], df['NAMA_MESIN'])]
         df['NO_BATCH'] = df['NO_BATCH_CLEAN'].fillna(df['BATCH_FILLED']).fillna("")
         df.drop(columns=['NO_BATCH_CLEAN', 'TANGGAL_TEMP', 'BATCH_FILLED'], errors='ignore', inplace=True)
 
@@ -203,11 +204,11 @@ def clean_data(df_qc, df_sic, df_oee):
         kondisi_kosong = df['NO_BATCH'] == ""
         kondisi_timbang = df['NAMA_MESIN'].str.contains('Timbang', case=False, na=False)
         
-        df_anomali = df[kondisi_kosong & ~kondisi_timbang].copy()
+        df_anomali = df[kondisi_kosong & ~kondisi_timbang].copy().reset_index(drop=True)
         df_anomali['SUMBER_DATA'] = sumber
         df_anomali['KETERANGAN_ANOMALI'] = 'No Batch Kosong (Bukan Proses Timbang)'
         
-        df_bersih = df[~kondisi_kosong | kondisi_timbang].copy()
+        df_bersih = df[~kondisi_kosong | kondisi_timbang].copy().reset_index(drop=True)
         return df_bersih, df_anomali
 
     df_qc, df_qc_anomali = pisahkan_anomali_batch(df_qc, 'QC')
@@ -237,13 +238,13 @@ def clean_data(df_qc, df_sic, df_oee):
 
     # Identifikasi Anomali Double Input SIC (>30 Menit)
     if 'CYCLE' in df_sic.columns:
-        df_sic = df_sic.sort_values(by=['NO_BATCH', 'NAMA_MESIN', 'CYCLE', 'TIMESTAMP'])
+        df_sic = df_sic.sort_values(by=['NO_BATCH', 'NAMA_MESIN', 'CYCLE', 'TIMESTAMP']).reset_index(drop=True)
         df_sic['TIME_DIFF'] = df_sic.groupby(['NO_BATCH', 'NAMA_MESIN', 'CYCLE'])['TIMESTAMP'].diff()
     else:
-        df_sic = df_sic.sort_values(by=['NO_BATCH', 'NAMA_MESIN', 'TIMESTAMP'])
+        df_sic = df_sic.sort_values(by=['NO_BATCH', 'NAMA_MESIN', 'TIMESTAMP']).reset_index(drop=True)
         df_sic['TIME_DIFF'] = df_sic.groupby(['NO_BATCH', 'NAMA_MESIN'])['TIMESTAMP'].diff()
     
-    df_sic_anomali_double = df_sic[df_sic['TIME_DIFF'] > pd.Timedelta(minutes=30)].copy()
+    df_sic_anomali_double = df_sic[df_sic['TIME_DIFF'] > pd.Timedelta(minutes=30)].copy().reset_index(drop=True)
     if not df_sic_anomali_double.empty:
         df_sic_anomali_double['KETERANGAN_ANOMALI'] = 'Double Input SIC (>30 Menit)'
     
@@ -419,8 +420,8 @@ try:
         availability_rate = 1.0
         nilai_oee = (availability_rate * performance_rate * quality_rate) * 100
 
-        kondisi_fp_kpi = df_sic['NAMA_MESIN'].astype(str).str.contains('Filling|Press', case=False, na=False) if not df_sic.empty else []
-        total_output_fp = pd.to_numeric(df_sic[kondisi_fp_kpi]['OUTPUT_PCS'], errors='coerce').fillna(0).sum() if not df_sic.empty else 0
+        kondisi_fp = df_sic['NAMA_MESIN'].astype(str).str.contains('Filling|Press', case=False, na=False) if not df_sic.empty else []
+        total_output_fp = pd.to_numeric(df_sic[kondisi_fp]['OUTPUT_PCS'], errors='coerce').fillna(0).sum() if not df_sic.empty else 0
 
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         col1.metric("Total Output (Filling & Press)", f"{total_output_fp:,.0f} Pcs")
@@ -750,7 +751,7 @@ try:
 
         q_col1, q_col2, q_col3, q_col4 = st.columns(4)
         q_col1.metric("Total Reject (QC)", f"{tot_reject:,.0f} Pcs")
-        q_col2.metric("Total Reproses (QC)", f"{tot_reproses:,.0f} Pcs")
+        q_col2.metric("Total Repproses (QC)", f"{tot_reproses:,.0f} Pcs")
         q_col3.metric("Total Defect (QC)", f"{(tot_reject + tot_reproses):,.0f} Pcs")
         q_col4.metric("Overall Quality Rate", f"{overall_quality:.2f} %")
 
@@ -1186,6 +1187,7 @@ try:
             df_wip_res = cached_get_wip_operational(df_sic, df_oee)
             
             if not df_wip_res.empty:
+                df_wip_res = df_wip_res.reset_index(drop=True)
                 def highlight_selisih(val):
                     if isinstance(val, (int, float)) and val > 0:
                         return 'background-color: #5c2c16; color: #ffcc80;'
@@ -1216,6 +1218,7 @@ try:
             st.markdown("### ⏱️ Age Mixing (Aging Ruahan Ke Filling)")
             df_age_res = cached_get_age_mixing(df_sic, df_oee)
             if not df_age_res.empty:
+                df_age_res = df_age_res.reset_index(drop=True)
                 def highlight_aging(val):
                     if isinstance(val, (int, float)) and val > 24.0:
                         return 'background-color: #7f1d1d; color: white;'
