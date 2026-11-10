@@ -99,7 +99,15 @@ def load_data_from_supabase(start_date, end_date):
     df_oee = conn.query(query_oee, params=params, ttl=300)
     df_sic = conn.query(query_sic, params=params, ttl=300)
     df_qc = conn.query(query_qc, params=params, ttl=300)
-    df_target = pd.DataFrame()
+
+    # Master target kapasitas per subbrand (tabel t_master_target). Jika belum ada -> kosong.
+    try:
+        df_target = conn.query(
+            'SELECT subbrand AS "SUBBRAND", target_per_jam AS "TARGET_PER_JAM" FROM t_master_target;',
+            ttl=300
+        )
+    except Exception:
+        df_target = pd.DataFrame(columns=['SUBBRAND', 'TARGET_PER_JAM'])
 
     return df_qc, df_sic, df_oee, df_target
 
@@ -312,19 +320,34 @@ def get_real_subbrand(row):
             return val
     return '-'
 
+DEFAULT_TARGET_PER_JAM = 2500.0
+
+def build_target_dict(df_target):
+    """Ubah tabel master target menjadi dict {SUBBRAND_UPPER: target/jam}."""
+    if df_target is None or df_target.empty:
+        return {}
+    d = df_target.copy()
+    d['SUBBRAND'] = d['SUBBRAND'].astype(str).str.strip().str.upper()
+    d['TARGET_PER_JAM'] = pd.to_numeric(d['TARGET_PER_JAM'], errors='coerce')
+    d = d[(d['SUBBRAND'] != '') & (d['TARGET_PER_JAM'] > 0)].drop_duplicates('SUBBRAND', keep='last')
+    return dict(zip(d['SUBBRAND'], d['TARGET_PER_JAM']))
+
 def get_target_capacity(subbrand_str, target_dict):
+    """Return (target/jam). Cocok persis dulu, lalu cocok sebagian (key terpanjang diprioritaskan)."""
     sb_upper = str(subbrand_str).strip().upper()
     if not sb_upper or sb_upper == '-':
-        return 2500.0
-    
+        return DEFAULT_TARGET_PER_JAM
+
     if sb_upper in target_dict:
         return target_dict[sb_upper]
-    
-    for key, val in target_dict.items():
-        if key in sb_upper or sb_upper in key:
-            return val
-    
-    return 2500.0
+
+    for key in sorted(target_dict, key=len, reverse=True):
+        # key (master) terkandung di nama produk -> aman.
+        # Arah sebaliknya hanya dipakai jika nama produk cukup panjang (hindari "12", "Pink", dst).
+        if key in sb_upper or (len(sb_upper) >= 12 and sb_upper in key):
+            return target_dict[key]
+
+    return DEFAULT_TARGET_PER_JAM
 
 def calc_gross_per_jam(row):
     durasi_menit = pd.to_numeric(row.get('Durasi Bersih', 0), errors='coerce')
@@ -434,10 +457,22 @@ try:
         df_oee_perf_fp['GROSS_OUTPUT_PCS'] = df_oee_perf_fp['CAPAIN_PRODUKSI_PCS'] + df_oee_perf_fp['REJECT_PCS'] + df_oee_perf_fp['REPROSES_PCS']
         df_oee_perf_fp['GROSS_CAPAIAN_PER_JAM'] = df_oee_perf_fp.apply(calc_gross_per_jam, axis=1)
 
-        dict_target_subbrand = {}
+        dict_target_subbrand = build_target_dict(df_target)
         df_oee_perf_fp['SUBBRAND_DISPLAY'] = df_oee_perf_fp.apply(get_real_subbrand, axis=1)
         df_oee_perf_fp['TARGET_SUBBRAND_JAM'] = df_oee_perf_fp['SUBBRAND_DISPLAY'].apply(lambda x: get_target_capacity(x, dict_target_subbrand))
         
+        # Transparansi: subbrand yang belum punya target memakai default
+        if not dict_target_subbrand:
+            st.warning(f"⚠️ Master target (tabel `t_master_target`) kosong/belum ada. Semua subbrand memakai target default {DEFAULT_TARGET_PER_JAM:,.0f} pcs/jam, sehingga Performance & OEE belum akurat.")
+        else:
+            sb_tanpa_target = sorted({
+                sb for sb in df_oee_perf_fp['SUBBRAND_DISPLAY'].unique()
+                if sb != '-' and get_target_capacity(sb, dict_target_subbrand) == DEFAULT_TARGET_PER_JAM and sb.upper() not in dict_target_subbrand
+            })
+            if sb_tanpa_target:
+                with st.expander(f"⚠️ {len(sb_tanpa_target)} subbrand belum punya target (memakai default {DEFAULT_TARGET_PER_JAM:,.0f} pcs/jam)"):
+                    st.write(sb_tanpa_target)
+
         df_oee_valid_perf = df_oee_perf_fp[df_oee_perf_fp['GROSS_CAPAIAN_PER_JAM'] > 0].copy().reset_index(drop=True)
         if not df_oee_valid_perf.empty:
             df_oee_valid_perf['RATIO_PERFORMANCE'] = (df_oee_valid_perf['GROSS_CAPAIAN_PER_JAM'] / df_oee_valid_perf['TARGET_SUBBRAND_JAM']).clip(upper=1.0)
