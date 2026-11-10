@@ -4,3 +4,5 @@ numpy
 gspread
 plotly
 oauth2client
+SQLAlchemy
+psycopg2-binary
