@@ -108,17 +108,25 @@ def load_all_data_for_monthly_qc():
     """
     Menarik seluruh data historical khusus untuk grafik Tren Bulanan Tab 2.
     """
-    query_oee_full = 'SELECT timestamp AS "TIMESTAMP", no_batch AS "NO_BATCH", nama_mesin AS "NAMA_MESIN", no_mesin_line AS "NO_MESIN_LINE", mesin_full AS "MESIN_FULL", capain_produksi_pcs AS "CAPAIN_PRODUKSI_PCS" FROM t_oee_logs;'
+    query_oee_full = 'SELECT timestamp AS "TIMESTAMP", no_batch AS "NO_BATCH", proses AS "PROSES", mesin_full AS "MESIN_FULL", capain_produksi_pcs AS "CAPAIN_PRODUKSI_PCS" FROM t_oee_logs;'
     query_qc_full = 'SELECT timestamp AS "TIMESTAMP", no_batch AS "NO_BATCH", nama_mesin AS "NAMA_MESIN", no_mesin_line AS "NO_MESIN_LINE", reject_pcs AS "REJECT_PCS", reproses_pcs AS "REPROSES_PCS" FROM t_qc_logs;'
 
     try:
         df_oee_f = conn.query(query_oee_full, ttl=300)
         df_qc_f = conn.query(query_qc_full, ttl=300)
         
-        df_oee_f['TIMESTAMP'] = pd.to_datetime(df_oee_f['TIMESTAMP'], errors='coerce')
-        df_qc_f['TIMESTAMP'] = pd.to_datetime(df_qc_f['TIMESTAMP'], errors='coerce')
+        # Samakan timezone: UTC -> WIB (tz-naive), sama seperti clean_data()
+        for _df in (df_oee_f, df_qc_f):
+            ts = pd.to_datetime(_df['TIMESTAMP'], utc=True, errors='coerce', format='mixed')
+            _df['TIMESTAMP'] = ts.dt.tz_convert('Asia/Jakarta').dt.tz_localize(None)
+
+        # t_oee_logs.nama_mesin kosong di DB -> nama mesin berasal dari kolom PROSES
+        df_oee_f['NAMA_MESIN'] = df_oee_f['PROSES'].astype(str).str.strip().str.title()
+        df_oee_f['NO_MESIN_LINE'] = df_oee_f['MESIN_FULL'].astype(str).str.extract(r'-\s*0*(\d+)')[0].fillna('')
+        df_qc_f['NAMA_MESIN'] = df_qc_f['NAMA_MESIN'].astype(str).str.strip().str.title()
         return df_qc_f.reset_index(drop=True), df_oee_f.reset_index(drop=True)
-    except Exception:
+    except Exception as e:
+        st.warning(f"Gagal memuat data tren bulanan: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
 # ==========================================
@@ -166,16 +174,33 @@ def clean_data(df_qc, df_sic, df_oee):
                 df[col] = df[col].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
                 df[col] = df[col].replace({'nan': '', 'None': '', 'NaN': '', '<NA>': ''})
 
+        # NO_MESIN_LINE di t_oee_logs kosong di DB -> turunkan dari MESIN_FULL ("Press - 06" -> "6")
+        if 'MESIN_FULL' in df.columns:
+            no_line_kosong = df['NO_MESIN_LINE'] == ''
+            line_dari_full = df['MESIN_FULL'].str.extract(r'-\s*0*(\d+)')[0].fillna('')
+            df.loc[no_line_kosong, 'NO_MESIN_LINE'] = line_dari_full[no_line_kosong]
+
     def fix_timestamp(ts_series):
-        ts_clean = ts_series.astype(str).str.replace(',', '', regex=False).str.replace('.', ':', regex=False)
-        return pd.to_datetime(ts_clean, dayfirst=True, format='mixed', errors='coerce')
+        """Normalisasi ke waktu WIB (Asia/Jakarta) tanpa info timezone (tz-naive)."""
+        if pd.api.types.is_datetime64_any_dtype(ts_series):
+            ts = ts_series
+        else:
+            # Coba parse ISO8601 (termasuk offset +00) apa adanya
+            ts = pd.to_datetime(ts_series, utc=True, errors='coerce', format='mixed')
+            if ts.isna().mean() > 0.5:
+                # Fallback format lama (mis. data dari Google Sheets: 10.30.00 / 1,5)
+                ts_clean = ts_series.astype(str).str.replace(',', '', regex=False).str.replace('.', ':', regex=False)
+                ts = pd.to_datetime(ts_clean, dayfirst=True, format='mixed', errors='coerce')
+        if getattr(ts.dt, 'tz', None) is not None:
+            ts = ts.dt.tz_convert('Asia/Jakarta').dt.tz_localize(None)
+        return ts
 
     df_qc['TIMESTAMP'] = fix_timestamp(df_qc['TIMESTAMP'])
-    df_sic['Timestamp'] = fix_timestamp(df_sic['Timestamp']) if 'Timestamp' in df_sic.columns else fix_timestamp(df_sic['TIMESTAMP'])
-    df_oee['TIMESTAMP'] = fix_timestamp(df_oee['TIMESTAMP'])
-    
-    if 'Timestamp' in df_sic.columns:
+    # FIX: jangan membuat kolom 'Timestamp' baru (menyebabkan kolom TIMESTAMP duplikat).
+    if 'Timestamp' in df_sic.columns and 'TIMESTAMP' not in df_sic.columns:
         df_sic = df_sic.rename(columns={'Timestamp': 'TIMESTAMP'})
+    df_sic['TIMESTAMP'] = fix_timestamp(df_sic['TIMESTAMP'])
+    df_oee['TIMESTAMP'] = fix_timestamp(df_oee['TIMESTAMP'])
 
     if 'NAMA_MESIN' in df_qc.columns: df_qc['NAMA_MESIN'] = df_qc['NAMA_MESIN'].str.title()
     if 'NAMA_MESIN' in df_sic.columns: df_sic['NAMA_MESIN'] = df_sic['NAMA_MESIN'].str.title()
