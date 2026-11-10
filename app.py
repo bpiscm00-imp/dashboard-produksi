@@ -147,7 +147,7 @@ def cached_get_daily_compliance_trend(df_oee, df_sic, df_qc, start_date, end_dat
 # ==========================================
 @st.cache_data(ttl=300, show_spinner=False)
 def clean_data(df_qc, df_sic, df_oee):
-    # Pastikan setiap DataFrame memiliki RangeIndex murni (0..N)
+    # 1. Pastikan setiap DataFrame memiliki RangeIndex murni (0..N)
     df_qc = df_qc.reset_index(drop=True)
     df_sic = df_sic.reset_index(drop=True)
     df_oee = df_oee.reset_index(drop=True)
@@ -234,9 +234,10 @@ def clean_data(df_qc, df_sic, df_oee):
         valid_vals = [v for v in vals if v and str(v).upper() not in ['NAN', 'NONE', '']]
         master_sb[b] = valid_vals[0] if valid_vals else 'UNKNOWN'
 
-    df_qc['SUBBRAND_MASTER'] = df_qc['NO_BATCH'].map(master_sb).fillna('UNKNOWN')
-    df_sic['SUBBRAND_MASTER'] = df_sic['NO_BATCH'].map(master_sb).fillna('UNKNOWN')
-    df_oee['SUBBRAND_MASTER'] = df_oee['NO_BATCH'].map(master_sb).fillna('UNKNOWN')
+    # Map dengan Dict murni
+    df_qc['SUBBRAND_MASTER'] = df_qc['NO_BATCH'].map(dict(master_sb)).fillna('UNKNOWN')
+    df_sic['SUBBRAND_MASTER'] = df_sic['NO_BATCH'].map(dict(master_sb)).fillna('UNKNOWN')
+    df_oee['SUBBRAND_MASTER'] = df_oee['NO_BATCH'].map(dict(master_sb)).fillna('UNKNOWN')
 
     # Identifikasi Anomali Double Input SIC (>30 Menit)
     if 'CYCLE' in df_sic.columns:
