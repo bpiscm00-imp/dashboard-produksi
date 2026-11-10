@@ -126,11 +126,13 @@ def load_all_data_for_monthly_qc():
 # ==========================================
 @st.cache_data(ttl=300, show_spinner=False)
 def cached_get_wip_operational(df_sic, df_oee):
-    return raw_get_wip_operational(df_sic, df_oee)
+    res = raw_get_wip_operational(df_sic, df_oee)
+    return res.reset_index(drop=True) if not res.empty else res
 
 @st.cache_data(ttl=300, show_spinner=False)
 def cached_get_age_mixing(df_sic, df_oee):
-    return raw_get_age_mixing(df_sic, df_oee)
+    res = raw_get_age_mixing(df_sic, df_oee)
+    return res.reset_index(drop=True) if not res.empty else res
 
 @st.cache_data(ttl=300, show_spinner=False)
 def cached_get_rapport_cards_range(df_oee, df_sic, df_qc, start_date, end_date):
@@ -195,7 +197,7 @@ def clean_data(df_qc, df_sic, df_oee):
 
     for df in [df_qc, df_sic, df_oee]:
         df['TANGGAL_TEMP'] = df['TIMESTAMP'].dt.date
-        # Menggunakan List Comprehension aman tanpa re-index alignment MultiIndex:
+        # Menggunakan List Comprehension tanpa re-indexing alignment:
         df['BATCH_FILLED'] = [ref_batch.get((t, m), np.nan) for t, m in zip(df['TANGGAL_TEMP'], df['NAMA_MESIN'])]
         df['NO_BATCH'] = df['NO_BATCH_CLEAN'].fillna(df['BATCH_FILLED']).fillna("")
         df.drop(columns=['NO_BATCH_CLEAN', 'TANGGAL_TEMP', 'BATCH_FILLED'], errors='ignore', inplace=True)
@@ -401,7 +403,7 @@ try:
         quality_rate = (capaian_oee_pcs / denominasi_quality) if denominasi_quality > 0 else 1.0
 
         kondisi_fp_oee = df_oee_perf['NAMA_MESIN_KEY'].astype(str).str.contains('Filling|Press', case=False, na=False)
-        df_oee_perf_fp = df_oee_perf[kondisi_fp_oee].copy()
+        df_oee_perf_fp = df_oee_perf[kondisi_fp_oee].copy().reset_index(drop=True)
 
         df_oee_perf_fp['GROSS_OUTPUT_PCS'] = df_oee_perf_fp['CAPAIN_PRODUKSI_PCS'] + df_oee_perf_fp['REJECT_PCS'] + df_oee_perf_fp['REPROSES_PCS']
         df_oee_perf_fp['GROSS_CAPAIAN_PER_JAM'] = df_oee_perf_fp.apply(calc_gross_per_jam, axis=1)
@@ -410,7 +412,7 @@ try:
         df_oee_perf_fp['SUBBRAND_DISPLAY'] = df_oee_perf_fp.apply(get_real_subbrand, axis=1)
         df_oee_perf_fp['TARGET_SUBBRAND_JAM'] = df_oee_perf_fp['SUBBRAND_DISPLAY'].apply(lambda x: get_target_capacity(x, dict_target_subbrand))
         
-        df_oee_valid_perf = df_oee_perf_fp[df_oee_perf_fp['GROSS_CAPAIAN_PER_JAM'] > 0].copy()
+        df_oee_valid_perf = df_oee_perf_fp[df_oee_perf_fp['GROSS_CAPAIAN_PER_JAM'] > 0].copy().reset_index(drop=True)
         if not df_oee_valid_perf.empty:
             df_oee_valid_perf['RATIO_PERFORMANCE'] = (df_oee_valid_perf['GROSS_CAPAIAN_PER_JAM'] / df_oee_valid_perf['TARGET_SUBBRAND_JAM']).clip(upper=1.0)
             performance_rate = df_oee_valid_perf['RATIO_PERFORMANCE'].mean()
@@ -450,7 +452,7 @@ try:
 
         with col_chart2:
             st.markdown("**Perbandingan Capaian (Khusus Mesin Filling & Press)**")
-            df_sic_fp = df_sic[kondisi_fp].copy() if not df_sic.empty else pd.DataFrame()
+            df_sic_fp = df_sic[kondisi_fp].copy().reset_index(drop=True) if not df_sic.empty else pd.DataFrame()
 
             if not df_sic_fp.empty:
                 capaian_mesin_sic = df_sic_fp.groupby('NAMA_MESIN')['OUTPUT_PCS'].median().round(0).reset_index()
@@ -475,7 +477,7 @@ try:
             with col_fil2:
                 mode_tampilan = st.radio("Mode Tampilan Grafik Komponen OEE:", ["Agregat Total (Bar Chart)", "Tren Harian (Line Chart)"], horizontal=True, key="radio_oee_mode_tab1")
 
-            df_oee_line_selected = df_oee_perf_fp[df_oee_perf_fp['NAMA_MESIN_KEY'].str.upper() == pilih_mesin_tren.upper()].copy()
+            df_oee_line_selected = df_oee_perf_fp[df_oee_perf_fp['NAMA_MESIN_KEY'].str.upper() == pilih_mesin_tren.upper()].copy().reset_index(drop=True)
             df_oee_line_selected['LINE_DISPLAY'] = df_oee_line_selected['NO_MESIN_LINE_KEY'].apply(format_line_number)
 
             if mode_tampilan == "Agregat Total (Bar Chart)":
@@ -583,7 +585,7 @@ try:
 
             # TREN OUTPUT PER CYCLE & RATA-RATA OUTPUT PER JAM
             st.markdown("### 📊 Tren Output per Cycle & Rata-Rata Output per Jam")
-            df_sic_selected = df_sic_fp[df_sic_fp['NAMA_MESIN'].str.upper() == pilih_mesin_tren.upper()].copy() if not df_sic_fp.empty else pd.DataFrame()
+            df_sic_selected = df_sic_fp[df_sic_fp['NAMA_MESIN'].str.upper() == pilih_mesin_tren.upper()].copy().reset_index(drop=True) if not df_sic_fp.empty else pd.DataFrame()
             if not df_sic_selected.empty:
                 df_sic_selected['LINE_DISPLAY'] = df_sic_selected['NO_MESIN_LINE'].apply(format_line_number) if 'NO_MESIN_LINE' in df_sic_selected.columns else "Line Unknown"
 
@@ -666,7 +668,7 @@ try:
                     'Availability', 'Performance', 'Quality', 'OEE', 'Status Target'
                 ]
 
-                df_table_display = df_table_oee[kolom_tampil].rename(columns={'NO_BATCH': 'No Batch'}).sort_values(by='Tanggal Produksi', ascending=False)
+                df_table_display = df_table_oee[kolom_tampil].rename(columns={'NO_BATCH': 'No Batch'}).sort_values(by='Tanggal Produksi', ascending=False).reset_index(drop=True)
 
                 st.dataframe(
                     df_table_display.style.format({
@@ -690,17 +692,17 @@ try:
             st.markdown("---")
             st.markdown("### 📈 Analisis Tren & Stabilitas Output antar Cycle")
 
-            df_sic_tren = df_sic_fp[df_sic_fp['NAMA_MESIN'] == pilih_mesin_tren].copy() if not df_sic_fp.empty else pd.DataFrame()
+            df_sic_tren = df_sic_fp[df_sic_fp['NAMA_MESIN'] == pilih_mesin_tren].copy().reset_index(drop=True) if not df_sic_fp.empty else pd.DataFrame()
             if not df_sic_tren.empty:
                 if 'STATUS_ALUR' in df_sic_tren.columns:
                     kondisi_istirahat_sanitasi = df_sic_tren['STATUS_ALUR'].astype(str).str.contains('ISTIRAHAT|SANITASI|BREAK|STOP', case=False, na=False)
-                    df_sic_produktif = df_sic_tren[(df_sic_tren['OUTPUT_PCS'] > 0) & (~kondisi_istirahat_sanitasi)].copy()
+                    df_sic_produktif = df_sic_tren[(df_sic_tren['OUTPUT_PCS'] > 0) & (~kondisi_istirahat_sanitasi)].copy().reset_index(drop=True)
                 else:
-                    df_sic_produktif = df_sic_tren[df_sic_tren['OUTPUT_PCS'] > 0].copy()
+                    df_sic_produktif = df_sic_tren[df_sic_tren['OUTPUT_PCS'] > 0].copy().reset_index(drop=True)
 
                 df_sic_produktif['NO_MESIN_LINE'] = df_sic_produktif['NO_MESIN_LINE'].apply(format_line_number) if 'NO_MESIN_LINE' in df_sic_produktif.columns else "Line Unknown"
 
-                df_sic_produktif = df_sic_produktif.sort_values(by=['NO_BATCH', 'NO_MESIN_LINE', 'TIMESTAMP'])
+                df_sic_produktif = df_sic_produktif.sort_values(by=['NO_BATCH', 'NO_MESIN_LINE', 'TIMESTAMP']).reset_index(drop=True)
                 df_sic_produktif['CYCLE_AKTIF'] = df_sic_produktif.groupby(['NO_BATCH', 'NO_MESIN_LINE']).cumcount() + 1
                 df_sic_produktif['DIFF_OUTPUT'] = df_sic_produktif.groupby(['NO_BATCH', 'NO_MESIN_LINE'])['OUTPUT_PCS'].diff().fillna(0)
 
@@ -793,7 +795,7 @@ try:
             if list_mesin_qc:
                 pilih_mesin_qc_bulanan = st.selectbox("Pilih Jenis Mesin untuk Tren QC:", list_mesin_qc, key="sb_mesin_qc_bulanan")
 
-                df_qc_monthly = df_oee_perf_full[df_oee_perf_full['NAMA_MESIN_KEY'].str.upper() == pilih_mesin_qc_bulanan.upper()].copy()
+                df_qc_monthly = df_oee_perf_full[df_oee_perf_full['NAMA_MESIN_KEY'].str.upper() == pilih_mesin_qc_bulanan.upper()].copy().reset_index(drop=True)
                 df_qc_monthly['BULAN_TAHUN'] = df_qc_monthly['TIMESTAMP'].dt.strftime('%Y-%m')
 
                 monthly_summary = df_qc_monthly.groupby('BULAN_TAHUN').agg({
@@ -834,7 +836,7 @@ try:
                 st.markdown(f"### 📊 Perbandingan Defect Rate per Line Mesin ({pilih_mesin_qc_bulanan})")
                 st.caption("Menampilkan persentase Reject Rate (%) dan Reproses Rate (%) untuk setiap line mesin pada periode aktif.")
 
-                df_qc_line_data = df_oee_perf[df_oee_perf['NAMA_MESIN_KEY'].str.upper() == pilih_mesin_qc_bulanan.upper()].copy() if not df_oee_perf.empty else pd.DataFrame()
+                df_qc_line_data = df_oee_perf[df_oee_perf['NAMA_MESIN_KEY'].str.upper() == pilih_mesin_qc_bulanan.upper()].copy().reset_index(drop=True) if not df_oee_perf.empty else pd.DataFrame()
 
                 if not df_qc_line_data.empty:
                     df_qc_line_data['LINE_DISPLAY'] = df_qc_line_data['NO_MESIN_LINE_KEY'].apply(format_line_number)
