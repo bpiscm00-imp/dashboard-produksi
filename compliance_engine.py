@@ -8,9 +8,25 @@ import numpy as np
 # 1. HELPER NORMALISASI & TANGGAL FISKAL
 # ============================================================
 
+def parse_time_with_date(dt_base, time_raw):
+    """
+    Menggabungkan tanggal dari timestamp acuan dengan string jam operasional 
+    (misal '15:14:00' atau '3:14:00 PM').
+    Mencegah bug tanggal tidak cocok (mismatched date) pada evaluasi oeeTepatWaktu & Late Log.
+    """
+    if pd.isna(dt_base) or not time_raw or str(time_raw).strip() in ['', 'nan', 'None', '<NA>', '-']:
+        return pd.NaT
+    try:
+        t_obj = pd.to_datetime(str(time_raw).strip(), format='mixed', errors='coerce')
+        if pd.isna(t_obj):
+            return pd.NaT
+        return pd.Timestamp.combine(dt_base.date(), t_obj.time())
+    except Exception:
+        return pd.NaT
+
 def extract_full_machine_name(row):
     """
-    Mengecek seluruh kemungkinan nama kolom di Google Sheet 
+    Mengecek seluruh kemungkinan nama kolom di Google Sheet / Supabase 
     untuk memastikan nama mesin dan nomor line selalu tergabung.
     """
     if isinstance(row, dict):
@@ -18,29 +34,28 @@ def extract_full_machine_name(row):
     else:
         get_val = lambda k: row[k] if k in row.index else ''
 
-    # 1. Cek jika MESIN_FULL / FULL_MESIN sudah terisi
-    for col in ['MESIN_FULL', 'FULL_MESIN', 'NAMA_MESIN_FULL']:
+    # 1. Cek jika MESIN_FULL / FULL_MESIN / mesin_full sudah terisi
+    for col in ['MESIN_FULL', 'FULL_MESIN', 'NAMA_MESIN_FULL', 'mesin_full']:
         v = str(get_val(col)).strip()
         if v and v.lower() not in ['nan', 'none', '', '<na>']:
             return v
     
     # 2. Ambil Nama Mesin Basis
     nama_mesin = ""
-    for col in ['NAMA_MESIN', 'NAMA MESIN', 'MESIN', 'PROSES', 'NAMA PROSES']:
+    for col in ['NAMA_MESIN', 'NAMA MESIN', 'MESIN', 'PROSES', 'NAMA PROSES', 'nama_mesin', 'proses']:
         v = str(get_val(col)).strip()
         if v and v.lower() not in ['nan', 'none', '', '<na>']:
             nama_mesin = v
             break
 
-    # 3. Ambil Nomor Line / Mesin (Mencakup variasi nama kolom header)
+    # 3. Ambil Nomor Line / Mesin
     no_line = ""
-    for col in ['NO_MESIN_LINE', 'NO MESIN LINE', 'NO_MESIN', 'NO MESIN', 'LINE', 'NO_LINE', 'NO LINE', 'LINE_NO', 'LINE NO', 'NOMOR_LINE', 'NOMOR LINE']:
+    for col in ['NO_MESIN_LINE', 'NO MESIN LINE', 'NO_MESIN', 'NO MESIN', 'LINE', 'NO_LINE', 'NO LINE', 'LINE_NO', 'LINE NO', 'NOMOR_LINE', 'NOMOR LINE', 'no_mesin_line']:
         v = str(get_val(col)).strip().replace('.0', '')
         if v and v.lower() not in ['nan', 'none', '', '<na>', '0']:
             no_line = v
             break
 
-    # 4. Gabungkan jika no_line belum ada di nama_mesin
     if no_line and no_line not in nama_mesin:
         return f"{nama_mesin} - {no_line}"
     
@@ -53,7 +68,6 @@ def normalisasi_mesin(nama_mentah):
     text = re.sub(r'\s+', ' ', str(nama_mentah)).strip().upper()
     text = re.sub(r'^([A-Z\s]+?)\s*[-_]?\s*(\d+)$', r'\1 - \2', text)
     
-    # Mengonversi digit nomor mesin ke int() agar leading zero (misal: Press - 02 -> Press - 2) otomatis hilang
     match_num = re.search(r'\d+', text)
     nomor = str(int(match_num.group(0))) if match_num else ""
     
@@ -94,7 +108,7 @@ def normalisasi_operator(nama_mentah):
 def is_qc_status_patuh(status_raw):
     """
     Memeriksa kepatuhan status QC secara fleksibel (case-insensitive)
-    untuk mengakomodasi berbagai variasi teks di Google Sheet.
+    untuk mengakomodasi berbagai variasi teks (STATUS_MONITORING & STATUS_ALUR).
     """
     if not status_raw or pd.isna(status_raw):
         return False
@@ -134,8 +148,9 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
 
     # A. PROSES DATA OEE
     for _, row in df_oee.iterrows():
-        ts_oee = pd.to_datetime(row.get('TIMESTAMP'), errors='coerce')
-        tgl_prod_oee = pd.to_datetime(row.get('TANGGAL_PRODUKSI', row.get('TIMESTAMP')), errors='coerce')
+        ts_oee = pd.to_datetime(row.get('TIMESTAMP', row.get('timestamp')), errors='coerce')
+        tgl_prod_raw = row.get('TANGGAL_PRODUKSI', row.get('tanggal_produksi', row.get('TIMESTAMP', row.get('timestamp'))))
+        tgl_prod_oee = pd.to_datetime(tgl_prod_raw, errors='coerce')
         
         if pd.isna(ts_oee):
             continue
@@ -149,7 +164,7 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
         else:
             tgl_acuan = (ts_oee - timedelta(days=1)).strftime('%Y-%m-%d') if is_before_cutoff else ts_oee_str
             
-        batch = normalisasi_batch(row.get('NO_BATCH'))
+        batch = normalisasi_batch(row.get('NO_BATCH', row.get('no_batch')))
         if not batch:
             continue
             
@@ -160,11 +175,15 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
         if start_date_str <= tgl_acuan <= end_date_str:
             raw_mesin_str = extract_full_machine_name(row)
             mesin = normalisasi_mesin(raw_mesin_str)
-            output_fg = pd.to_numeric(row.get('CAPAIN_PRODUKSI_PCS', row.get('CAPAIAN_PRODUKSI_PCS', 0)), errors='coerce') or 0
-            op = normalisasi_operator(row.get('OPERATOR', row.get('NAMA_OPERATOR')))
-            jam_mulai = pd.to_datetime(row.get('JAM_MULAI'), errors='coerce')
+            output_fg = pd.to_numeric(row.get('CAPAIN_PRODUKSI_PCS', row.get('capain_produksi_pcs', 0)), errors='coerce') or 0
+            op = normalisasi_operator(row.get('OPERATOR', row.get('operator', row.get('NAMA_OPERATOR'))))
             
-            # Key tanpa operator agar OEE & SIC selalu cocok meskipun ada beda penulisan nama operator
+            j_mulai_raw = row.get('JAM_MULAI_AKTUAL', row.get('jam_mulai_aktual', row.get('JAM_MULAI', row.get('jam_mulai'))))
+            j_selesai_raw = row.get('JAM_SELESAI_AKTUAL', row.get('jam_selesai_aktual', row.get('JAM_SELESAI', row.get('jam_selesai'))))
+            
+            jam_mulai = parse_time_with_date(ts_oee, j_mulai_raw)
+            selesai = parse_time_with_date(ts_oee, j_selesai_raw)
+            
             key = f"{tgl_acuan}_{batch}_{mesin}"
             
             if key not in master_log:
@@ -183,17 +202,16 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             if pd.notna(jam_mulai): 
                 master_log[key]['jamMulaiOEE'] = jam_mulai
             
-            selesai = pd.to_datetime(row.get('JAM_SELESAI'), errors='coerce')
             if pd.notna(selesai) and pd.notna(ts_oee) and ts_oee < (selesai - timedelta(minutes=30)):
                 master_log[key]['oeeTepatWaktu'] = False
 
     # B. PROSES DATA SIC
     for _, row in df_sic.iterrows():
-        ts = pd.to_datetime(row.get('TIMESTAMP'), errors='coerce')
+        ts = pd.to_datetime(row.get('TIMESTAMP', row.get('timestamp')), errors='coerce')
         if pd.isna(ts):
             continue
             
-        batch = normalisasi_batch(row.get('NO_BATCH'))
+        batch = normalisasi_batch(row.get('NO_BATCH', row.get('no_batch')))
         if not batch:
             continue
             
@@ -202,9 +220,9 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
         if fiscal_date_sic and start_date_str <= fiscal_date_sic <= end_date_str:
             raw_mesin_str = extract_full_machine_name(row)
             mesin = normalisasi_mesin(raw_mesin_str)
-            output_jam = pd.to_numeric(row.get('OUTPUT_PCS', 0), errors='coerce') or 0
-            op = normalisasi_operator(row.get('OPERATOR', row.get('NAMA_OPERATOR')))
-            status = str(row.get('STATUS_ALUR', '')).strip()
+            output_jam = pd.to_numeric(row.get('OUTPUT_PCS', row.get('output_pcs', 0)), errors='coerce') or 0
+            op = normalisasi_operator(row.get('OPERATOR', row.get('operator', row.get('NAMA_OPERATOR'))))
+            status = str(row.get('STATUS_ALUR', row.get('status_alur', ''))).strip()
             
             key = f"{fiscal_date_sic}_{batch}_{mesin}"
             
@@ -229,11 +247,11 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
 
     # C. PROSES DATA QC
     for _, row in df_qc.iterrows():
-        ts_qc = pd.to_datetime(row.get('TIMESTAMP'), errors='coerce')
+        ts_qc = pd.to_datetime(row.get('TIMESTAMP', row.get('timestamp')), errors='coerce')
         if pd.isna(ts_qc):
             continue
             
-        batch = normalisasi_batch(row.get('NO_BATCH'))
+        batch = normalisasi_batch(row.get('NO_BATCH', row.get('no_batch')))
         if not batch:
             continue
             
@@ -242,10 +260,10 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
         if fiscal_date_qc and start_date_str <= fiscal_date_qc <= end_date_str:
             raw_mesin_str = extract_full_machine_name(row)
             mesin = normalisasi_mesin(raw_mesin_str)
-            reproses = pd.to_numeric(row.get('REPROSES_PCS', 0), errors='coerce') or 0
-            reject = pd.to_numeric(row.get('REJECT_PCS', 0), errors='coerce') or 0
-            op_qc = normalisasi_operator(row.get('INSPEKTOR', row.get('OPERATOR', row.get('NAMA_OPERATOR'))))
-            status = str(row.get('STATUS_ALUR', '')).strip()
+            reproses = pd.to_numeric(row.get('REPROSES_PCS', row.get('reproses_pcs', 0)), errors='coerce') or 0
+            reject = pd.to_numeric(row.get('REJECT_PCS', row.get('reject_pcs', 0)), errors='coerce') or 0
+            op_qc = normalisasi_operator(row.get('INSPEKTOR', row.get('OPERATOR', row.get('operator', row.get('NAMA_OPERATOR')))))
+            status = str(row.get('STATUS_MONITORING', row.get('status_monitoring', row.get('STATUS_ALUR', row.get('status_alur', ''))))).strip()
             
             total_qc_indiv += 1
             if is_qc_status_patuh(status):
@@ -404,7 +422,6 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
                     'pic': item['operator']
                 })
 
-    # Agregasi Tim Inspector QC (Sama Persis dengan Logika Department Summary)
     for qc_key, qc_item in global_qc_map.items():
         user_qc = qc_item['user']
         if user_qc and user_qc != "-":
@@ -417,7 +434,6 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             elif qc_item['rows'] > 1:
                 qc_user_stats[user_qc]['patuh'] += 0.7
 
-    # Format Tampilan Metrik (Tampilkan N/A jika Data 0)
     if dept_total_oee_sic > 0:
         skor_dept_oee_sic_str = f"{round((dept_patuh_oee_sic / dept_total_oee_sic) * 100)}% ({round(dept_patuh_oee_sic)}/{dept_total_oee_sic})"
     else:
@@ -433,14 +449,12 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
     else:
         skor_akurasi_str = "N/A (Tidak ada data)"
 
-    # DataFrame Visual Compliance Produksi
     prod_chart_list = []
     for op, s in prod_user_stats.items():
         rate = round((s['patuh'] / s['total']) * 100, 2) if s['total'] > 0 else 0.0
         prod_chart_list.append({'Operator': op, 'Total Batch': s['total'], 'Compliance Rate (%)': rate})
     df_prod_compliance = pd.DataFrame(prod_chart_list)
 
-    # DataFrame Visual Compliance QC
     qc_chart_list = []
     for op, s in qc_user_stats.items():
         rate = round((s['patuh'] / s['total']) * 100, 2) if s['total'] > 0 else 0.0
@@ -617,13 +631,10 @@ def build_wa_msg_qc(qc_list, periode_str):
     return msg
 
 # ============================================================
-# 5. TREN COMPLIANCE
+# 5. TREN COMPLIANCE & WIP MONITORING
 # ============================================================
+
 def get_daily_compliance_trend(df_oee, df_sic, df_qc, start_date_str, end_date_str):
-    """
-    Menghitung tren rata-rata compliance rate harian untuk Tim Produksi dan Tim QC 
-    dalam rentang tanggal/bulan yang dipilih.
-    """
     date_range = pd.date_range(start=start_date_str, end=end_date_str)
     daily_list = []
 
@@ -646,18 +657,7 @@ def get_daily_compliance_trend(df_oee, df_sic, df_qc, start_date_str, end_date_s
 
     return pd.DataFrame(daily_list)
 
-# compliance_engine.py (Tambahkan di bagian paling bawah)
-
 def get_wip_operational(df_sic, df_oee):
-    """
-    Tracking WIP Operasional per Batch:
-    1. Mulai & Output Mixing dalam KG (Excluding Proses Timbang).
-    2. Output Kumulatif Filling/Press (FP) (Pcs).
-    3. Output Kumulatif Packing (Pcs).
-    4. Hitungan Durasi Perpindahan (Mixing -> FP, FP -> Packing, Total Lead Time).
-    5. Selisih Output (FP vs Packing) (Pcs).
-    """
-    # 1. Standarisasi Log Data SIC & OEE
     logs_sic = df_sic[['TIMESTAMP', 'NO_BATCH', 'NAMA_MESIN', 'SUBBRAND_MASTER', 'OUTPUT_PCS']].copy() if not df_sic.empty else pd.DataFrame()
     
     logs_oee = df_oee[['TIMESTAMP', 'NO_BATCH', 'NAMA_MESIN', 'SUBBRAND_MASTER', 'CAPAIN_PRODUKSI_PCS']].rename(
@@ -668,21 +668,18 @@ def get_wip_operational(df_sic, df_oee):
     if df_all.empty:
         return pd.DataFrame()
 
-    # Cleansing awal
     df_all['NO_BATCH'] = df_all['NO_BATCH'].astype(str).str.strip()
     df_all['NAMA_MESIN'] = df_all['NAMA_MESIN'].astype(str).str.strip().str.upper()
     df_all['OUTPUT_PCS'] = pd.to_numeric(df_all['OUTPUT_PCS'], errors='coerce').fillna(0)
     df_all['TIMESTAMP'] = pd.to_datetime(df_all['TIMESTAMP'], errors='coerce')
     
-    # Filter batch valid
     df_all = df_all[~df_all['NO_BATCH'].isin(['', '-', 'NAN', 'NONE', '<NA>'])].dropna(subset=['TIMESTAMP'])
     df_all = df_all.sort_values(by=['NO_BATCH', 'TIMESTAMP'])
 
-    # 2. Pengelompokan Kategori Proses (Exclude Timbang)
     def kat_proses(nama_mesin):
         m = str(nama_mesin).upper()
         if 'TIMBANG' in m:
-            return 'EXCLUDE'  # Abaikan proses timbang
+            return 'EXCLUDE'
         elif any(x in m for x in ['MIXING', 'MO', 'MS']):
             return 'MIXING'
         elif any(x in m for x in ['FILLING', 'PRESS', 'FO', 'FM']):
@@ -692,13 +689,9 @@ def get_wip_operational(df_sic, df_oee):
         return 'OTHER'
 
     df_all['KATEGORI_PROSES'] = df_all['NAMA_MESIN'].apply(kat_proses)
-    
-    # Filter buang log Timbang
     df_all = df_all[df_all['KATEGORI_PROSES'] != 'EXCLUDE'].copy()
 
-    # 3. Pengolahan Data per Batch
     wip_records = []
-    
     for no_batch, group in df_all.groupby('NO_BATCH'):
         subbrand_series = group['SUBBRAND_MASTER'].replace({'UNKNOWN': np.nan, '': np.nan}).dropna()
         subbrand = subbrand_series.iloc[0] if not subbrand_series.empty else '-'
@@ -707,23 +700,18 @@ def get_wip_operational(df_sic, df_oee):
         g_fp = group[group['KATEGORI_PROSES'] == 'FILLING_PRESS']
         g_pack = group[group['KATEGORI_PROSES'] == 'PACKING']
 
-        # --- A. PROSES 1: MIXING (Satuan Kg) ---
         ts_mix_start = g_mix['TIMESTAMP'].min() if not g_mix.empty else pd.NaT
         out_mix_kg = 0.0
         if not g_mix.empty:
             valid_mix_out = g_mix[g_mix['OUTPUT_PCS'] > 0]['OUTPUT_PCS']
             out_mix_kg = float(valid_mix_out.iloc[-1]) if not valid_mix_out.empty else float(g_mix['OUTPUT_PCS'].iloc[-1])
 
-        # --- B. PROSES 2: FILLING / PRESS (Satuan Pcs) ---
         ts_fp_start = g_fp['TIMESTAMP'].min() if not g_fp.empty else pd.NaT
         out_fp_kumulatif = g_fp['OUTPUT_PCS'].sum() if not g_fp.empty else 0
 
-        # --- C. PROSES 3: PACKING (Satuan Pcs) ---
         ts_pack_start = g_pack['TIMESTAMP'].min() if not g_pack.empty else pd.NaT
         out_pack_kumulatif = g_pack['OUTPUT_PCS'].sum() if not g_pack.empty else 0
 
-        # --- D. KALKULASI DURASI PERPINDAHAN PROSES ---
-        # 1. Durasi Mixing -> FP
         durasi_mix_fp_str = "-"
         if pd.notna(ts_mix_start) and pd.notna(ts_fp_start):
             diff_sec = (ts_fp_start - ts_mix_start).total_seconds()
@@ -732,7 +720,6 @@ def get_wip_operational(df_sic, df_oee):
                 mins = int((diff_sec % 3600) // 60)
                 durasi_mix_fp_str = f"{hours}j {mins}m" if hours > 0 else f"{mins}m"
 
-        # 2. Durasi FP -> Packing
         durasi_fp_pack_str = "-"
         if pd.notna(ts_fp_start) and pd.notna(ts_pack_start):
             diff_sec = (ts_pack_start - ts_fp_start).total_seconds()
@@ -741,7 +728,6 @@ def get_wip_operational(df_sic, df_oee):
                 mins = int((diff_sec % 3600) // 60)
                 durasi_fp_pack_str = f"{hours}j {mins}m" if hours > 0 else f"{mins}m"
 
-        # 3. Total Lead Time
         ts_first = group['TIMESTAMP'].min()
         ts_last = group['TIMESTAMP'].max()
         durasi_total_str = "-"
@@ -751,7 +737,6 @@ def get_wip_operational(df_sic, df_oee):
             mins = int((diff_sec % 3600) // 60)
             durasi_total_str = f"{hours}j {mins}m" if hours > 0 else f"{mins}m"
 
-        # --- E. SELISIH OUTPUT (FP vs PACKING) ---
         selisih_fp_pack = out_fp_kumulatif - out_pack_kumulatif
         mulai_tgl_jam = ts_mix_start.strftime('%d/%m/%Y %H:%M') if pd.notna(ts_mix_start) else ts_first.strftime('%d/%m/%Y %H:%M')
 
@@ -771,10 +756,6 @@ def get_wip_operational(df_sic, df_oee):
     return pd.DataFrame(wip_records)
 
 def get_age_mixing(df_sic, df_oee):
-    """
-    Menghitung Umur Ruahan (Age Mixing):
-    Selisih waktu antara Selesai Mixing/MO dengan Mulai Filling/Press.
-    """
     comb = []
     for df, col_out, col_m in [(df_sic, 'OUTPUT_PCS', 'NAMA_MESIN'), (df_oee, 'CAPAIN_PRODUKSI_PCS', 'PROSES')]:
         if not df.empty:
