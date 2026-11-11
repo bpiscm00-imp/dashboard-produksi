@@ -129,9 +129,9 @@ def load_all_data_for_monthly_qc():
             _df['TIMESTAMP'] = ts.dt.tz_convert('Asia/Jakarta').dt.tz_localize(None)
 
         # t_oee_logs.nama_mesin kosong di DB -> nama mesin berasal dari kolom PROSES
-        df_oee_f['NAMA_MESIN'] = df_oee_f['PROSES'].astype(str).str.strip().str.title()
+        df_oee_f['NAMA_MESIN'] = normalize_jenis_mesin(df_oee_f['PROSES'])
         df_oee_f['NO_MESIN_LINE'] = df_oee_f['MESIN_FULL'].astype(str).str.extract(r'-\s*0*(\d+)')[0].fillna('')
-        df_qc_f['NAMA_MESIN'] = df_qc_f['NAMA_MESIN'].astype(str).str.strip().str.title()
+        df_qc_f['NAMA_MESIN'] = normalize_jenis_mesin(df_qc_f['NAMA_MESIN'])
         return df_qc_f.reset_index(drop=True), df_oee_f.reset_index(drop=True)
     except Exception as e:
         st.warning(f"Gagal memuat data tren bulanan: {e}")
@@ -161,6 +161,28 @@ def cached_get_daily_compliance_trend(df_oee, df_sic, df_qc, start_date, end_dat
 # ==========================================
 # 3. CLEANSING & PIPELINE PENGOLAHAN DATA
 # ==========================================
+# ==========================================
+# NORMALISASI NAMA JENIS MESIN
+# ==========================================
+ALIAS_JENIS_MESIN = {
+    'Pres': 'Press', 'Hummer': 'Hammer', 'Moxing 500 Kg': 'Mixing 500 Kg',
+    'Blis': 'Blister', 'Pac': 'Packing Line', 'Packing': 'Packing Line',
+    'Filling Lipstick': 'Filling Otomatis Lipstick',
+}
+
+def normalize_jenis_mesin(series):
+    """
+    Seragamkan nama jenis mesin (tanpa nomor mesin/line):
+    'Filling Otomatis 21' -> 'Filling Otomatis', 'Press8' -> 'Press', 'Tr 8' -> 'Tr',
+    'Mixing Serbuk 12' -> 'Mixing Serbuk'. Angka di tengah nama (Mixing 500 Kg) tidak diubah.
+    """
+    s = series.astype(str).str.strip()
+    s = s.replace({'nan': '', 'None': '', 'NaN': '', '<NA>': ''})
+    s = s.str.replace(r'\s*-\s*\d[\d,\s]*$', '', regex=True)   # akhiran " - 5"
+    s = s.str.replace(r'\s*\d+$', '', regex=True)               # akhiran angka: "Press 3", "Press8"
+    s = s.str.strip().str.title()
+    return s.replace(ALIAS_JENIS_MESIN)
+
 @st.cache_data(ttl=300, show_spinner=False)
 def clean_data(df_qc, df_sic, df_oee):
     # 1. Pastikan setiap DataFrame memiliki RangeIndex murni (0..N)
@@ -210,9 +232,9 @@ def clean_data(df_qc, df_sic, df_oee):
     df_sic['TIMESTAMP'] = fix_timestamp(df_sic['TIMESTAMP'])
     df_oee['TIMESTAMP'] = fix_timestamp(df_oee['TIMESTAMP'])
 
-    if 'NAMA_MESIN' in df_qc.columns: df_qc['NAMA_MESIN'] = df_qc['NAMA_MESIN'].str.title()
-    if 'NAMA_MESIN' in df_sic.columns: df_sic['NAMA_MESIN'] = df_sic['NAMA_MESIN'].str.title()
-    if 'PROSES' in df_oee.columns: df_oee['NAMA_MESIN'] = df_oee['PROSES'].str.title()
+    if 'NAMA_MESIN' in df_qc.columns: df_qc['NAMA_MESIN'] = normalize_jenis_mesin(df_qc['NAMA_MESIN'])
+    if 'NAMA_MESIN' in df_sic.columns: df_sic['NAMA_MESIN'] = normalize_jenis_mesin(df_sic['NAMA_MESIN'])
+    if 'PROSES' in df_oee.columns: df_oee['NAMA_MESIN'] = normalize_jenis_mesin(df_oee['PROSES'])
 
     invalid_batches = ['', '-', 'nan', 'None', 'NAT']
     for df in [df_qc, df_sic, df_oee]:
@@ -359,6 +381,44 @@ def calc_gross_per_jam(row):
     else:
         operating_hours = durasi_menit / 60.0
         return float(gross_pcs) / operating_hours
+
+def apply_column_filters(df, key_prefix):
+    """
+    Filter per kolom untuk tabel. User memilih kolom yang ingin difilter, lalu:
+      - kolom angka  -> slider rentang (min - max)
+      - kolom teks   -> pilih nilai (multiselect) dan/atau cari teks yang mengandung kata kunci
+    """
+    if df.empty:
+        return df
+
+    df_f = df
+    with st.expander("🔎 Filter per Kolom", expanded=False):
+        kolom_dipilih = st.multiselect(
+            "Pilih kolom yang ingin difilter:", list(df.columns), key=f"{key_prefix}_kolom"
+        )
+
+        for col in kolom_dipilih:
+            if pd.api.types.is_numeric_dtype(df[col]):
+                lo, hi = float(np.floor(df[col].min())), float(np.ceil(df[col].max()))
+                if lo == hi:
+                    st.caption(f"**{col}**: seluruh baris bernilai {lo:,.0f}")
+                    continue
+                step = 1.0 if (hi - lo) > 200 else 0.01
+                rentang = st.slider(col, min_value=lo, max_value=hi, value=(lo, hi), step=step, key=f"{key_prefix}_{col}_rentang")
+                df_f = df_f[df_f[col].between(rentang[0], rentang[1])]
+            else:
+                c1, c2 = st.columns([3, 2])
+                opsi = sorted(df[col].astype(str).unique().tolist())
+                nilai = c1.multiselect(f"{col} - pilih nilai", opsi, key=f"{key_prefix}_{col}_nilai")
+                kata = c2.text_input(f"{col} - mengandung teks", key=f"{key_prefix}_{col}_kata")
+                if nilai:
+                    df_f = df_f[df_f[col].astype(str).isin(nilai)]
+                if kata.strip():
+                    df_f = df_f[df_f[col].astype(str).str.contains(kata.strip(), case=False, na=False, regex=False)]
+
+        st.caption(f"Menampilkan {len(df_f):,} dari {len(df):,} baris")
+
+    return df_f.reset_index(drop=True)
 
 # ==========================================
 # 5. EKSEKUSI TAMPILAN DASHBOARD
@@ -644,66 +704,21 @@ try:
 
             st.markdown("---")
 
-            # TREN OUTPUT PER CYCLE & RATA-RATA OUTPUT PER JAM
-            st.markdown("### 📊 Tren Output per Cycle & Rata-Rata Output per Jam")
-            df_sic_selected = df_sic_fp[df_sic_fp['NAMA_MESIN'].str.upper() == pilih_mesin_tren.upper()].copy().reset_index(drop=True) if not df_sic_fp.empty else pd.DataFrame()
-            if not df_sic_selected.empty:
-                df_sic_selected['LINE_DISPLAY'] = df_sic_selected['NO_MESIN_LINE'].apply(format_line_number) if 'NO_MESIN_LINE' in df_sic_selected.columns else "Line Unknown"
-
-            col_t1, col_t2 = st.columns(2)
-
-            with col_t1:
-                st.markdown(f"**1. Tren Output per Cycle ({pilih_mesin_tren})**")
-                if not df_sic_selected.empty:
-                    df_sic_selected_sorted = df_sic_selected.sort_values(by='TIMESTAMP')
-                    fig_cycle = px.line(
-                        df_sic_selected_sorted,
-                        x='TIMESTAMP',
-                        y='OUTPUT_PCS',
-                        color='LINE_DISPLAY',
-                        markers=True,
-                        labels={'TIMESTAMP': 'Waktu / Timestamp', 'OUTPUT_PCS': 'Output (Pcs)', 'LINE_DISPLAY': 'Nomor Line'}
-                    )
-                    fig_cycle.update_traces(hovertemplate='<b>%{data.name}</b><br>Waktu: %{x}<br>Output: %{y:,.0f} Pcs<extra></extra>')
-                    fig_cycle.update_layout(height=380, legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5))
-                    st.plotly_chart(fig_cycle, use_container_width=True)
-                else:
-                    st.info("Tidak ada data cycle untuk jenis mesin ini.")
-
-            with col_t2:
-                st.markdown(f"**2. Rata-Rata Output per Jam per Line ({pilih_mesin_tren})**")
-                if not df_sic_selected.empty:
-                    avg_hourly = df_sic_selected.groupby('LINE_DISPLAY')['OUTPUT_PCS'].mean().round(0).reset_index()
-                    avg_hourly = avg_hourly.sort_values(by='LINE_DISPLAY')
-                    
-                    fig_avg = px.bar(
-                        avg_hourly,
-                        x='LINE_DISPLAY',
-                        y='OUTPUT_PCS',
-                        text='OUTPUT_PCS',
-                        color='OUTPUT_PCS',
-                        color_continuous_scale='Teal',
-                        labels={'LINE_DISPLAY': 'Nomor Line', 'OUTPUT_PCS': 'Rata-Rata Output (Pcs/Jam)'}
-                    )
-                    fig_avg.update_traces(texttemplate='%{text:,.0f} Pcs', textposition='outside')
-                    fig_avg.update_layout(height=380, showlegend=False, yaxis_range=[0, max(avg_hourly['OUTPUT_PCS'].max() * 1.25, 100)])
-                    st.plotly_chart(fig_avg, use_container_width=True)
-                else:
-                    st.info("Tidak ada data rata-rata output untuk jenis mesin ini.")
-
-            st.markdown("---")
-
-            # TABEL DETAIL ANALISIS OEE
-            st.markdown(f"**📋 Tabel Detail Analisis OEE ({pilih_mesin_tren})**")
-            if not df_oee_line_selected.empty:
-                df_table_oee = df_oee_line_selected.copy()
+            # TABEL DETAIL ANALISIS OEE (seluruh jenis mesin Filling & Press, bukan hanya yang dipilih)
+            st.markdown("**📋 Tabel Detail Analisis OEE (Seluruh Mesin Filling & Press)**")
+            if not df_oee_perf_fp.empty:
+                df_table_oee = df_oee_perf_fp.copy()
+                df_table_oee['LINE_DISPLAY'] = df_table_oee['NO_MESIN_LINE_KEY'].apply(format_line_number)
                 df_table_oee['Tanggal Produksi'] = df_table_oee['TIMESTAMP'].dt.strftime('%Y-%m-%d')
-                df_table_oee['Subbrand'] = df_table_oee.apply(get_real_subbrand, axis=1)
+                df_table_oee['Subbrand'] = df_table_oee['SUBBRAND_DISPLAY']
+                df_table_oee['Jenis Mesin'] = df_table_oee['NAMA_MESIN_KEY']
 
-                if 'MESIN_FULL' in df_table_oee.columns and df_table_oee['MESIN_FULL'].notna().any():
-                    df_table_oee['Mesin_Full'] = df_table_oee['MESIN_FULL']
-                else:
-                    df_table_oee['Mesin_Full'] = df_table_oee['NAMA_MESIN_KEY'] + " - " + df_table_oee['LINE_DISPLAY']
+                mesin_full_valid = df_table_oee['MESIN_FULL'].astype(str).str.strip().replace({'nan': '', 'None': ''}) if 'MESIN_FULL' in df_table_oee.columns else pd.Series('', index=df_table_oee.index)
+                df_table_oee['Mesin_Full'] = np.where(
+                    mesin_full_valid != '',
+                    mesin_full_valid,
+                    df_table_oee['NAMA_MESIN_KEY'] + " - " + df_table_oee['LINE_DISPLAY']
+                )
 
                 df_table_oee['Capaian Produksi Gross'] = df_table_oee['GROSS_OUTPUT_PCS']
                 df_table_oee['Total Reject'] = df_table_oee['REJECT_PCS']
@@ -723,13 +738,16 @@ try:
                 df_table_oee['OEE'] = (df_table_oee['Availability'] / 100) * (df_table_oee['Performance'] / 100) * (df_table_oee['Quality'] / 100) * 100
 
                 kolom_tampil = [
-                    'Tanggal Produksi', 'NO_BATCH', 'Subbrand', 'Mesin_Full',
+                    'Tanggal Produksi', 'NO_BATCH', 'Subbrand', 'Jenis Mesin', 'Mesin_Full',
                     'Capaian Produksi Gross', 'Total Reject', 'Total Repproses',
                     'Durasi', 'Capaian (Gross) / Jam', 'Target Kapasitas / Jam',
                     'Availability', 'Performance', 'Quality', 'OEE', 'Status Target'
                 ]
 
                 df_table_display = df_table_oee[kolom_tampil].rename(columns={'NO_BATCH': 'No Batch'}).sort_values(by='Tanggal Produksi', ascending=False).reset_index(drop=True)
+
+                # Filter per kolom (opsional, dipilih user)
+                df_table_display = apply_column_filters(df_table_display, key_prefix="oee_detail")
 
                 st.dataframe(
                     df_table_display.style.format({
@@ -747,7 +765,7 @@ try:
                     use_container_width=True
                 )
             else:
-                st.info("Tidak ada data detail OEE untuk mesin yang dipilih.")
+                st.info("Tidak ada data detail OEE pada periode ini.")
 
             # ANALISIS TREN & STABILITAS OUTPUT ANTAR CYCLE
             st.markdown("---")
