@@ -101,13 +101,24 @@ def load_data_from_supabase(start_date, end_date):
     df_qc = conn.query(query_qc, params=params, ttl=300)
 
     # Master target kapasitas per subbrand (tabel t_master_target). Jika belum ada -> kosong.
+    kolom_target = ['SUBBRAND', 'JENIS_MESIN', 'NO_MESIN_LINE', 'TARGET_PER_JAM']
     try:
         df_target = conn.query(
-            'SELECT subbrand AS "SUBBRAND", target_per_jam AS "TARGET_PER_JAM" FROM t_master_target;',
+            'SELECT subbrand AS "SUBBRAND", jenis_mesin AS "JENIS_MESIN", no_mesin_line AS "NO_MESIN_LINE", '
+            'target_per_jam AS "TARGET_PER_JAM" FROM t_master_target;',
             ttl=300
         )
     except Exception:
-        df_target = pd.DataFrame(columns=['SUBBRAND', 'TARGET_PER_JAM'])
+        try:
+            # Skema lama (belum ada kolom jenis_mesin / no_mesin_line)
+            df_target = conn.query(
+                'SELECT subbrand AS "SUBBRAND", target_per_jam AS "TARGET_PER_JAM" FROM t_master_target;',
+                ttl=300
+            )
+            df_target['JENIS_MESIN'] = None
+            df_target['NO_MESIN_LINE'] = None
+        except Exception:
+            df_target = pd.DataFrame(columns=kolom_target)
 
     return df_qc, df_sic, df_oee, df_target
 
@@ -176,7 +187,7 @@ def normalize_jenis_mesin(series):
     'Filling Otomatis 21' -> 'Filling Otomatis', 'Press8' -> 'Press', 'Tr 8' -> 'Tr',
     'Mixing Serbuk 12' -> 'Mixing Serbuk'. Angka di tengah nama (Mixing 500 Kg) tidak diubah.
     """
-    s = series.astype(str).str.strip()
+    s = series.fillna('').astype(str).str.strip()
     s = s.replace({'nan': '', 'None': '', 'NaN': '', '<NA>': ''})
     s = s.str.replace(r'\s*-\s*\d[\d,\s]*$', '', regex=True)   # akhiran " - 5"
     s = s.str.replace(r'\s*\d+$', '', regex=True)               # akhiran angka: "Press 3", "Press8"
@@ -201,7 +212,7 @@ def clean_data(df_qc, df_sic, df_oee):
 
         for col in ['NO_BATCH', 'NAMA_MESIN', 'SUBBRAND', 'VARIAN_PRODUK', 'NO_MESIN_LINE', 'MESIN_FULL', 'PROSES']:
             if col in df.columns:
-                df[col] = df[col].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+                df[col] = df[col].fillna('').astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
                 df[col] = df[col].replace({'nan': '', 'None': '', 'NaN': '', '<NA>': ''})
 
         # NO_MESIN_LINE di t_oee_logs kosong di DB -> turunkan dari MESIN_FULL ("Press - 06" -> "6")
@@ -344,32 +355,79 @@ def get_real_subbrand(row):
 
 DEFAULT_TARGET_PER_JAM = 2500.0
 
+def _norm_line_target(x):
+    """'05' / 5 / '5.0' -> '5'. Kosong -> ''."""
+    t = str(x).strip()
+    if t.lower() in ('', 'nan', 'none', '<na>'):
+        return ''
+    if t.endswith('.0'):
+        t = t[:-2]
+    return t.lstrip('0') or '0'
+
+class TargetLookup:
+    """Master target bertingkat: (subbrand, jenis mesin, no mesin). Kosong pada jenis/line = berlaku umum."""
+    def __init__(self, by_key):
+        self.by_key = by_key
+        self.subs = sorted({k[0] for k in by_key}, key=len, reverse=True)
+
+    def __bool__(self):
+        return bool(self.by_key)
+
+    def resolve_sub(self, sb_upper):
+        """Cocok persis dulu, lalu sebagian (key terpanjang diprioritaskan)."""
+        if sb_upper in self.subs:
+            return sb_upper
+        for key in self.subs:
+            # key master terkandung di nama produk -> aman.
+            # Arah sebaliknya hanya jika nama produk cukup panjang (hindari "12", "Pink", dst).
+            if key in sb_upper or (len(sb_upper) >= 12 and sb_upper in key):
+                return key
+        return None
+
 def build_target_dict(df_target):
-    """Ubah tabel master target menjadi dict {SUBBRAND_UPPER: target/jam}."""
+    """Ubah tabel master target menjadi TargetLookup {(SUBBRAND, JENIS_MESIN, NO_LINE): target/jam}."""
     if df_target is None or df_target.empty:
-        return {}
+        return TargetLookup({})
     d = df_target.copy()
+    for col in ('JENIS_MESIN', 'NO_MESIN_LINE'):
+        if col not in d.columns:
+            d[col] = ''
     d['SUBBRAND'] = d['SUBBRAND'].astype(str).str.strip().str.upper()
+    d['JENIS_MESIN'] = normalize_jenis_mesin(d['JENIS_MESIN'].fillna('')).str.upper()
+    d['NO_MESIN_LINE'] = d['NO_MESIN_LINE'].apply(_norm_line_target)
     d['TARGET_PER_JAM'] = pd.to_numeric(d['TARGET_PER_JAM'], errors='coerce')
-    d = d[(d['SUBBRAND'] != '') & (d['TARGET_PER_JAM'] > 0)].drop_duplicates('SUBBRAND', keep='last')
-    return dict(zip(d['SUBBRAND'], d['TARGET_PER_JAM']))
+    d = d[(d['SUBBRAND'] != '') & (d['TARGET_PER_JAM'] > 0)]
+    d = d.drop_duplicates(['SUBBRAND', 'JENIS_MESIN', 'NO_MESIN_LINE'], keep='last')
+    return TargetLookup({
+        (r.SUBBRAND, r.JENIS_MESIN, r.NO_MESIN_LINE): float(r.TARGET_PER_JAM) for r in d.itertuples()
+    })
 
-def get_target_capacity(subbrand_str, target_dict):
-    """Return (target/jam). Cocok persis dulu, lalu cocok sebagian (key terpanjang diprioritaskan)."""
+def get_target_info(subbrand_str, jenis_mesin, no_line, lookup):
+    """
+    Return (target/jam, sumber). Urutan pencarian, dipakai yang pertama ketemu:
+      1. subbrand + jenis mesin + nomor mesin   -> 'Mesin & Line'
+      2. subbrand + jenis mesin                 -> 'Jenis Mesin'
+      3. subbrand saja (target umum)            -> 'Umum'
+      4. tidak ada                              -> 'Default'
+    """
     sb_upper = str(subbrand_str).strip().upper()
-    if not sb_upper or sb_upper == '-':
-        return DEFAULT_TARGET_PER_JAM
+    if not sb_upper or sb_upper == '-' or not lookup:
+        return DEFAULT_TARGET_PER_JAM, 'Default'
+    sb_key = lookup.resolve_sub(sb_upper)
+    if sb_key is None:
+        return DEFAULT_TARGET_PER_JAM, 'Default'
 
-    if sb_upper in target_dict:
-        return target_dict[sb_upper]
+    jenis = str(jenis_mesin).strip().upper()
+    line = _norm_line_target(no_line)
+    for kunci, sumber in (((sb_key, jenis, line), 'Mesin & Line'),
+                          ((sb_key, jenis, ''), 'Jenis Mesin'),
+                          ((sb_key, '', ''), 'Umum')):
+        if kunci in lookup.by_key:
+            return lookup.by_key[kunci], sumber
+    return DEFAULT_TARGET_PER_JAM, 'Default'
 
-    for key in sorted(target_dict, key=len, reverse=True):
-        # key (master) terkandung di nama produk -> aman.
-        # Arah sebaliknya hanya dipakai jika nama produk cukup panjang (hindari "12", "Pink", dst).
-        if key in sb_upper or (len(sb_upper) >= 12 and sb_upper in key):
-            return target_dict[key]
-
-    return DEFAULT_TARGET_PER_JAM
+def get_target_capacity(subbrand_str, lookup, jenis_mesin='', no_line=''):
+    return get_target_info(subbrand_str, jenis_mesin, no_line, lookup)[0]
 
 def calc_gross_per_jam(row):
     durasi_menit = pd.to_numeric(row.get('Durasi Bersih', 0), errors='coerce')
@@ -492,7 +550,11 @@ try:
         df_oee_perf['NAMA_MESIN_KEY'] = df_oee_perf['NAMA_MESIN'].astype(str).str.strip().str.title()
         
         if 'NO_MESIN_LINE' in df_oee_perf.columns:
-            df_oee_perf['NO_MESIN_LINE_KEY'] = df_oee_perf['NO_MESIN_LINE'].astype(str).str.strip().str.replace('.0', '', regex=False)
+            df_oee_perf['NO_MESIN_LINE_KEY'] = df_oee_perf['NO_MESIN_LINE'].fillna('').astype(str).str.strip().str.replace('.0', '', regex=False).replace({'nan': '', 'None': ''})
+            if 'MESIN_FULL' in df_oee_perf.columns:
+                _line_full = df_oee_perf['MESIN_FULL'].fillna('').astype(str).str.extract(r'-\s*0*(\d+)')[0].fillna('')
+                _kosong = df_oee_perf['NO_MESIN_LINE_KEY'] == ''
+                df_oee_perf.loc[_kosong, 'NO_MESIN_LINE_KEY'] = _line_full[_kosong]
         elif 'MESIN_FULL' in df_oee_perf.columns:
             df_oee_perf['NO_MESIN_LINE_KEY'] = df_oee_perf['MESIN_FULL'].astype(str).str.extract(r'(\d+)')[0].fillna('')
         else:
@@ -519,16 +581,23 @@ try:
 
         dict_target_subbrand = build_target_dict(df_target)
         df_oee_perf_fp['SUBBRAND_DISPLAY'] = df_oee_perf_fp.apply(get_real_subbrand, axis=1)
-        df_oee_perf_fp['TARGET_SUBBRAND_JAM'] = df_oee_perf_fp['SUBBRAND_DISPLAY'].apply(lambda x: get_target_capacity(x, dict_target_subbrand))
+        _info_target = [
+            get_target_info(sb, jm, ln, dict_target_subbrand)
+            for sb, jm, ln in zip(df_oee_perf_fp['SUBBRAND_DISPLAY'], df_oee_perf_fp['NAMA_MESIN_KEY'], df_oee_perf_fp['NO_MESIN_LINE_KEY'])
+        ]
+        df_oee_perf_fp['TARGET_SUBBRAND_JAM'] = [t[0] for t in _info_target]
+        df_oee_perf_fp['SUMBER_TARGET'] = [t[1] for t in _info_target]
         
         # Transparansi: subbrand yang belum punya target memakai default
         if not dict_target_subbrand:
             st.warning(f"⚠️ Master target (tabel `t_master_target`) kosong/belum ada. Semua subbrand memakai target default {DEFAULT_TARGET_PER_JAM:,.0f} pcs/jam, sehingga Performance & OEE belum akurat.")
         else:
-            sb_tanpa_target = sorted({
-                sb for sb in df_oee_perf_fp['SUBBRAND_DISPLAY'].unique()
-                if sb != '-' and get_target_capacity(sb, dict_target_subbrand) == DEFAULT_TARGET_PER_JAM and sb.upper() not in dict_target_subbrand
-            })
+            sb_tanpa_target = sorted(
+                df_oee_perf_fp.loc[
+                    (df_oee_perf_fp['SUMBER_TARGET'] == 'Default') & (df_oee_perf_fp['SUBBRAND_DISPLAY'] != '-'),
+                    'SUBBRAND_DISPLAY'
+                ].unique()
+            )
             if sb_tanpa_target:
                 with st.expander(f"⚠️ {len(sb_tanpa_target)} subbrand belum punya target (memakai default {DEFAULT_TARGET_PER_JAM:,.0f} pcs/jam)"):
                     st.write(sb_tanpa_target)
@@ -727,6 +796,7 @@ try:
 
                 df_table_oee['Capaian (Gross) / Jam'] = pd.to_numeric(df_table_oee['GROSS_CAPAIAN_PER_JAM'], errors='coerce').fillna(0)
                 df_table_oee['Target Kapasitas / Jam'] = pd.to_numeric(df_table_oee['TARGET_SUBBRAND_JAM'], errors='coerce').fillna(0)
+                df_table_oee['Sumber Target'] = df_table_oee['SUMBER_TARGET']
 
                 df_table_oee['Availability'] = 100.0
                 df_table_oee['Quality'] = df_table_oee.apply(lambda r: (r['CAPAIN_PRODUKSI_PCS'] / r['GROSS_OUTPUT_PCS'] * 100) if r['GROSS_OUTPUT_PCS'] > 0 else 100.0, axis=1)
@@ -740,7 +810,7 @@ try:
                 kolom_tampil = [
                     'Tanggal Produksi', 'NO_BATCH', 'Subbrand', 'Jenis Mesin', 'Mesin_Full',
                     'Capaian Produksi Gross', 'Total Reject', 'Total Repproses',
-                    'Durasi', 'Capaian (Gross) / Jam', 'Target Kapasitas / Jam',
+                    'Durasi', 'Capaian (Gross) / Jam', 'Target Kapasitas / Jam', 'Sumber Target',
                     'Availability', 'Performance', 'Quality', 'OEE', 'Status Target'
                 ]
 
@@ -856,7 +926,11 @@ try:
             df_oee_perf_full['NO_BATCH_KEY'] = df_oee_perf_full['NO_BATCH'].astype(str).str.strip()
             df_oee_perf_full['NAMA_MESIN_KEY'] = df_oee_perf_full['NAMA_MESIN'].astype(str).str.strip().str.title()
             if 'NO_MESIN_LINE' in df_oee_perf_full.columns:
-                df_oee_perf_full['NO_MESIN_LINE_KEY'] = df_oee_perf_full['NO_MESIN_LINE'].astype(str).str.strip().str.replace('.0', '', regex=False)
+                df_oee_perf_full['NO_MESIN_LINE_KEY'] = df_oee_perf_full['NO_MESIN_LINE'].fillna('').astype(str).str.strip().str.replace('.0', '', regex=False).replace({'nan': '', 'None': ''})
+                if 'MESIN_FULL' in df_oee_perf_full.columns:
+                    _line_full = df_oee_perf_full['MESIN_FULL'].fillna('').astype(str).str.extract(r'-\s*0*(\d+)')[0].fillna('')
+                    _kosong = df_oee_perf_full['NO_MESIN_LINE_KEY'] == ''
+                    df_oee_perf_full.loc[_kosong, 'NO_MESIN_LINE_KEY'] = _line_full[_kosong]
             elif 'MESIN_FULL' in df_oee_perf_full.columns:
                 df_oee_perf_full['NO_MESIN_LINE_KEY'] = df_oee_perf_full['MESIN_FULL'].astype(str).str.extract(r'(\d+)')[0].fillna('')
             else:
