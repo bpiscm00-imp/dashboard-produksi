@@ -15,6 +15,12 @@ from compliance_engine import (
     get_wip_operational as raw_get_wip_operational,
     get_age_mixing as raw_get_age_mixing
 )
+from report_engine import generate_report, format_tanggal_id
+from kpi_core import (
+    ALIAS_JENIS_MESIN, normalize_jenis_mesin, format_line_number, get_real_subbrand,
+    DEFAULT_TARGET_PER_JAM, build_target_dict, get_target_info, get_target_capacity,
+    calc_gross_per_jam, hitung_konteks_oee, hitung_komponen_oee_per_line,
+)
 
 st.set_page_config(page_title="Dashboard Produksi & Kepatuhan", layout="wide")
 
@@ -175,25 +181,6 @@ def cached_get_daily_compliance_trend(df_oee, df_sic, df_qc, start_date, end_dat
 # ==========================================
 # NORMALISASI NAMA JENIS MESIN
 # ==========================================
-ALIAS_JENIS_MESIN = {
-    'Pres': 'Press', 'Hummer': 'Hammer', 'Moxing 500 Kg': 'Mixing 500 Kg',
-    'Blis': 'Blister', 'Pac': 'Packing Line', 'Packing': 'Packing Line',
-    'Filling Lipstick': 'Filling Otomatis Lipstick',
-}
-
-def normalize_jenis_mesin(series):
-    """
-    Seragamkan nama jenis mesin (tanpa nomor mesin/line):
-    'Filling Otomatis 21' -> 'Filling Otomatis', 'Press8' -> 'Press', 'Tr 8' -> 'Tr',
-    'Mixing Serbuk 12' -> 'Mixing Serbuk'. Angka di tengah nama (Mixing 500 Kg) tidak diubah.
-    """
-    s = series.fillna('').astype(str).str.strip()
-    s = s.replace({'nan': '', 'None': '', 'NaN': '', '<NA>': ''})
-    s = s.str.replace(r'\s*-\s*\d[\d,\s]*$', '', regex=True)   # akhiran " - 5"
-    s = s.str.replace(r'\s*\d+$', '', regex=True)               # akhiran angka: "Press 3", "Press8"
-    s = s.str.strip().str.title()
-    return s.replace(ALIAS_JENIS_MESIN)
-
 @st.cache_data(ttl=300, show_spinner=False)
 def clean_data(df_qc, df_sic, df_oee):
     # 1. Pastikan setiap DataFrame memiliki RangeIndex murni (0..N)
@@ -333,113 +320,6 @@ def clean_data(df_qc, df_sic, df_oee):
 # ==========================================
 # 4. HELPER FUNCTIONS
 # ==========================================
-def format_line_number(val):
-    if pd.isna(val) or str(val).strip() in ['', 'nan', 'NaN', 'None', '-']:
-        return "Line Unknown"
-    val_str = str(val).strip()
-    if val_str.startswith("Line "):
-        return val_str
-    if val_str.endswith('.0'):
-        val_str = val_str[:-2]
-    return f"Line {val_str}"
-
-def get_real_subbrand(row):
-    vp = str(row.get('VARIAN_PRODUK', '')).strip()
-    sm = str(row.get('SUBBRAND_MASTER', '')).strip()
-    sb = str(row.get('SUBBRAND', '')).strip()
-    
-    for val in [vp, sm, sb]:
-        if val and val.upper() not in ['NAN', 'NONE', 'UNKNOWN', '']:
-            return val
-    return '-'
-
-DEFAULT_TARGET_PER_JAM = 2500.0
-
-def _norm_line_target(x):
-    """'05' / 5 / '5.0' -> '5'. Kosong -> ''."""
-    t = str(x).strip()
-    if t.lower() in ('', 'nan', 'none', '<na>'):
-        return ''
-    if t.endswith('.0'):
-        t = t[:-2]
-    return t.lstrip('0') or '0'
-
-class TargetLookup:
-    """Master target bertingkat: (subbrand, jenis mesin, no mesin). Kosong pada jenis/line = berlaku umum."""
-    def __init__(self, by_key):
-        self.by_key = by_key
-        self.subs = sorted({k[0] for k in by_key}, key=len, reverse=True)
-
-    def __bool__(self):
-        return bool(self.by_key)
-
-    def resolve_sub(self, sb_upper):
-        """Cocok persis dulu, lalu sebagian (key terpanjang diprioritaskan)."""
-        if sb_upper in self.subs:
-            return sb_upper
-        for key in self.subs:
-            # key master terkandung di nama produk -> aman.
-            # Arah sebaliknya hanya jika nama produk cukup panjang (hindari "12", "Pink", dst).
-            if key in sb_upper or (len(sb_upper) >= 12 and sb_upper in key):
-                return key
-        return None
-
-def build_target_dict(df_target):
-    """Ubah tabel master target menjadi TargetLookup {(SUBBRAND, JENIS_MESIN, NO_LINE): target/jam}."""
-    if df_target is None or df_target.empty:
-        return TargetLookup({})
-    d = df_target.copy()
-    for col in ('JENIS_MESIN', 'NO_MESIN_LINE'):
-        if col not in d.columns:
-            d[col] = ''
-    d['SUBBRAND'] = d['SUBBRAND'].astype(str).str.strip().str.upper()
-    d['JENIS_MESIN'] = normalize_jenis_mesin(d['JENIS_MESIN'].fillna('')).str.upper()
-    d['NO_MESIN_LINE'] = d['NO_MESIN_LINE'].apply(_norm_line_target)
-    d['TARGET_PER_JAM'] = pd.to_numeric(d['TARGET_PER_JAM'], errors='coerce')
-    d = d[(d['SUBBRAND'] != '') & (d['TARGET_PER_JAM'] > 0)]
-    d = d.drop_duplicates(['SUBBRAND', 'JENIS_MESIN', 'NO_MESIN_LINE'], keep='last')
-    return TargetLookup({
-        (r.SUBBRAND, r.JENIS_MESIN, r.NO_MESIN_LINE): float(r.TARGET_PER_JAM) for r in d.itertuples()
-    })
-
-def get_target_info(subbrand_str, jenis_mesin, no_line, lookup):
-    """
-    Return (target/jam, sumber). Urutan pencarian, dipakai yang pertama ketemu:
-      1. subbrand + jenis mesin + nomor mesin   -> 'Mesin & Line'
-      2. subbrand + jenis mesin                 -> 'Jenis Mesin'
-      3. subbrand saja (target umum)            -> 'Umum'
-      4. tidak ada                              -> 'Default'
-    """
-    sb_upper = str(subbrand_str).strip().upper()
-    if not sb_upper or sb_upper == '-' or not lookup:
-        return DEFAULT_TARGET_PER_JAM, 'Default'
-    sb_key = lookup.resolve_sub(sb_upper)
-    if sb_key is None:
-        return DEFAULT_TARGET_PER_JAM, 'Default'
-
-    jenis = str(jenis_mesin).strip().upper()
-    line = _norm_line_target(no_line)
-    for kunci, sumber in (((sb_key, jenis, line), 'Mesin & Line'),
-                          ((sb_key, jenis, ''), 'Jenis Mesin'),
-                          ((sb_key, '', ''), 'Umum')):
-        if kunci in lookup.by_key:
-            return lookup.by_key[kunci], sumber
-    return DEFAULT_TARGET_PER_JAM, 'Default'
-
-def get_target_capacity(subbrand_str, lookup, jenis_mesin='', no_line=''):
-    return get_target_info(subbrand_str, jenis_mesin, no_line, lookup)[0]
-
-def calc_gross_per_jam(row):
-    durasi_menit = pd.to_numeric(row.get('Durasi Bersih', 0), errors='coerce')
-    if pd.isna(durasi_menit) or durasi_menit <= 0:
-        return 0.0
-    gross_pcs = row.get('GROSS_OUTPUT_PCS', 0.0)
-    if durasi_menit < 60:
-        return float(gross_pcs)
-    else:
-        operating_hours = durasi_menit / 60.0
-        return float(gross_pcs) / operating_hours
-
 def apply_column_filters(df, key_prefix):
     """
     Filter per kolom untuk tabel. User memilih kolom yang ingin difilter, lalu:
@@ -518,12 +398,13 @@ try:
     df_oee_full = df_oee.copy()
 
     # TAB NAVIGATION
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📊 Ringkasan Eksekutif & OEE", 
         "🔍 Kualitas (QC) & Alur", 
         "⚠️ Verifikasi Data Anomali",
         "📋 Kepatuhan & Rapport Card",
-        "🏭 Monitoring Operasional & WIP"
+        "🏭 Monitoring Operasional & WIP",
+        "📄 Report Harian (H-1)"
     ])
 
     # ==========================================
@@ -532,62 +413,19 @@ try:
     with tab1:
         st.subheader("Indikator Performa Utama (KPI) - Fokus OEE & Performa Subbrand")
         
-        df_qc_temp = df_qc.copy()
-        df_qc_temp['NO_BATCH_KEY'] = df_qc_temp['NO_BATCH'].astype(str).str.strip()
-        df_qc_temp['NAMA_MESIN_KEY'] = df_qc_temp['NAMA_MESIN'].astype(str).str.strip().str.title()
-        df_qc_temp['NO_MESIN_LINE_KEY'] = df_qc_temp['NO_MESIN_LINE'].astype(str).str.strip().str.replace('.0', '', regex=False) if 'NO_MESIN_LINE' in df_qc_temp.columns else ''
-        
-        df_qc_temp['REJECT_PCS'] = pd.to_numeric(df_qc_temp['REJECT_PCS'], errors='coerce').fillna(0)
-        df_qc_temp['REPROSES_PCS'] = pd.to_numeric(df_qc_temp['REPROSES_PCS'], errors='coerce').fillna(0)
+        # Seluruh perhitungan KPI ada di kpi_core.hitung_konteks_oee (dipakai juga oleh Report Harian)
+        _ctx = hitung_konteks_oee(df_oee, df_qc, df_sic, df_target)
+        df_oee_perf = _ctx['df_oee_perf']
+        df_oee_perf_fp = _ctx['df_oee_perf_fp']
+        dict_target_subbrand = _ctx['dict_target_subbrand']
+        total_reject_kemas_oee = _ctx['total_reject_kemas_oee']
+        quality_rate = _ctx['quality_rate']
+        performance_rate = _ctx['performance_rate']
+        availability_rate = _ctx['availability_rate']
+        nilai_oee = _ctx['nilai_oee']
+        kondisi_fp = _ctx['kondisi_fp']
+        total_output_fp = _ctx['total_output_fp']
 
-        qc_grouped = df_qc_temp.groupby(['NO_BATCH_KEY', 'NAMA_MESIN_KEY', 'NO_MESIN_LINE_KEY']).agg({
-            'REJECT_PCS': 'sum',
-            'REPROSES_PCS': 'sum'
-        }).reset_index()
-
-        df_oee_perf = df_oee.copy()
-        df_oee_perf['NO_BATCH_KEY'] = df_oee_perf['NO_BATCH'].astype(str).str.strip()
-        df_oee_perf['NAMA_MESIN_KEY'] = df_oee_perf['NAMA_MESIN'].astype(str).str.strip().str.title()
-        
-        if 'NO_MESIN_LINE' in df_oee_perf.columns:
-            df_oee_perf['NO_MESIN_LINE_KEY'] = df_oee_perf['NO_MESIN_LINE'].fillna('').astype(str).str.strip().str.replace('.0', '', regex=False).replace({'nan': '', 'None': ''})
-            if 'MESIN_FULL' in df_oee_perf.columns:
-                _line_full = df_oee_perf['MESIN_FULL'].fillna('').astype(str).str.extract(r'-\s*0*(\d+)')[0].fillna('')
-                _kosong = df_oee_perf['NO_MESIN_LINE_KEY'] == ''
-                df_oee_perf.loc[_kosong, 'NO_MESIN_LINE_KEY'] = _line_full[_kosong]
-        elif 'MESIN_FULL' in df_oee_perf.columns:
-            df_oee_perf['NO_MESIN_LINE_KEY'] = df_oee_perf['MESIN_FULL'].astype(str).str.extract(r'(\d+)')[0].fillna('')
-        else:
-            df_oee_perf['NO_MESIN_LINE_KEY'] = ''
-
-        df_oee_perf = df_oee_perf.merge(qc_grouped, on=['NO_BATCH_KEY', 'NAMA_MESIN_KEY', 'NO_MESIN_LINE_KEY'], how='left')
-        df_oee_perf['REJECT_PCS'] = pd.to_numeric(df_oee_perf['REJECT_PCS'], errors='coerce').fillna(0)
-        df_oee_perf['REPROSES_PCS'] = pd.to_numeric(df_oee_perf['REPROSES_PCS'], errors='coerce').fillna(0)
-        df_oee_perf['CAPAIN_PRODUKSI_PCS'] = pd.to_numeric(df_oee_perf['CAPAIN_PRODUKSI_PCS'], errors='coerce').fillna(0)
-
-        total_reject_kemas_oee = pd.to_numeric(df_oee['KEMAS_RUSAK_PRODUKSI'], errors='coerce').fillna(0).sum() if 'KEMAS_RUSAK_PRODUKSI' in df_oee.columns else 0
-        capaian_oee_pcs = pd.to_numeric(df_oee['CAPAIN_PRODUKSI_PCS'], errors='coerce').fillna(0).sum() if 'CAPAIN_PRODUKSI_PCS' in df_oee.columns else 0
-        total_reject_qc = pd.to_numeric(df_qc['REJECT_PCS'], errors='coerce').fillna(0).sum() if 'REJECT_PCS' in df_qc.columns else 0
-        total_reproses_qc = pd.to_numeric(df_qc['REPROSES_PCS'], errors='coerce').fillna(0).sum() if 'REPROSES_PCS' in df_qc.columns else 0
-        
-        denominasi_quality = capaian_oee_pcs + total_reproses_qc + total_reject_qc
-        quality_rate = (capaian_oee_pcs / denominasi_quality) if denominasi_quality > 0 else 1.0
-
-        kondisi_fp_oee = df_oee_perf['NAMA_MESIN_KEY'].astype(str).str.contains('Filling|Press', case=False, na=False)
-        df_oee_perf_fp = df_oee_perf[kondisi_fp_oee].copy().reset_index(drop=True)
-
-        df_oee_perf_fp['GROSS_OUTPUT_PCS'] = df_oee_perf_fp['CAPAIN_PRODUKSI_PCS'] + df_oee_perf_fp['REJECT_PCS'] + df_oee_perf_fp['REPROSES_PCS']
-        df_oee_perf_fp['GROSS_CAPAIAN_PER_JAM'] = df_oee_perf_fp.apply(calc_gross_per_jam, axis=1)
-
-        dict_target_subbrand = build_target_dict(df_target)
-        df_oee_perf_fp['SUBBRAND_DISPLAY'] = df_oee_perf_fp.apply(get_real_subbrand, axis=1)
-        _info_target = [
-            get_target_info(sb, jm, ln, dict_target_subbrand)
-            for sb, jm, ln in zip(df_oee_perf_fp['SUBBRAND_DISPLAY'], df_oee_perf_fp['NAMA_MESIN_KEY'], df_oee_perf_fp['NO_MESIN_LINE_KEY'])
-        ]
-        df_oee_perf_fp['TARGET_SUBBRAND_JAM'] = [t[0] for t in _info_target]
-        df_oee_perf_fp['SUMBER_TARGET'] = [t[1] for t in _info_target]
-        
         # Transparansi: subbrand yang belum punya target memakai default
         if not dict_target_subbrand:
             st.warning(f"⚠️ Master target (tabel `t_master_target`) kosong/belum ada. Semua subbrand memakai target default {DEFAULT_TARGET_PER_JAM:,.0f} pcs/jam, sehingga Performance & OEE belum akurat.")
@@ -601,19 +439,6 @@ try:
             if sb_tanpa_target:
                 with st.expander(f"⚠️ {len(sb_tanpa_target)} subbrand belum punya target (memakai default {DEFAULT_TARGET_PER_JAM:,.0f} pcs/jam)"):
                     st.write(sb_tanpa_target)
-
-        df_oee_valid_perf = df_oee_perf_fp[df_oee_perf_fp['GROSS_CAPAIAN_PER_JAM'] > 0].copy().reset_index(drop=True)
-        if not df_oee_valid_perf.empty:
-            df_oee_valid_perf['RATIO_PERFORMANCE'] = (df_oee_valid_perf['GROSS_CAPAIAN_PER_JAM'] / df_oee_valid_perf['TARGET_SUBBRAND_JAM']).clip(upper=1.0)
-            performance_rate = df_oee_valid_perf['RATIO_PERFORMANCE'].mean()
-        else:
-            performance_rate = 0.85
-
-        availability_rate = 1.0
-        nilai_oee = (availability_rate * performance_rate * quality_rate) * 100
-
-        kondisi_fp = df_sic['NAMA_MESIN'].astype(str).str.contains('Filling|Press', case=False, na=False) if not df_sic.empty else []
-        total_output_fp = pd.to_numeric(df_sic[kondisi_fp]['OUTPUT_PCS'], errors='coerce').fillna(0).sum() if not df_sic.empty else 0
 
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         col1.metric("Total Output (Filling & Press)", f"{total_output_fp:,.0f} Pcs")
@@ -671,21 +496,7 @@ try:
             df_oee_line_selected['LINE_DISPLAY'] = df_oee_line_selected['NO_MESIN_LINE_KEY'].apply(format_line_number)
 
             if mode_tampilan == "Agregat Total (Bar Chart)":
-                oee_by_line = []
-                for line_name, group in df_oee_line_selected.groupby('LINE_DISPLAY'):
-                    c_pcs = group['CAPAIN_PRODUKSI_PCS'].sum()
-                    rej_pcs = group['REJECT_PCS'].sum()
-                    rep_pcs = group['REPROSES_PCS'].sum()
-                    den_q = c_pcs + rej_pcs + rep_pcs
-                    q_line = (c_pcs / den_q * 100) if den_q > 0 else 100.0
-
-                    valid_perf = group[group['GROSS_CAPAIAN_PER_JAM'] > 0]
-                    p_line = (valid_perf['GROSS_CAPAIAN_PER_JAM'] / valid_perf['TARGET_SUBBRAND_JAM']).clip(upper=1.0).mean() * 100 if not valid_perf.empty else 85.0
-                    a_line = 100.0
-                    oee_line = (q_line / 100.0) * (p_line / 100.0) * (a_line / 100.0) * 100.0
-
-                    oee_by_line.append({'Nomor Mesin': line_name, 'OEE (%)': round(oee_line, 2), 'Performance (%)': round(p_line, 2), 'Quality (%)': round(q_line, 2), 'Availability (%)': round(a_line, 2)})
-
+                oee_by_line = hitung_komponen_oee_per_line(df_oee_line_selected)
                 df_line_kpi = pd.DataFrame(oee_by_line)
                 if not df_line_kpi.empty:
                     col_oee1, col_oee2 = st.columns(2)
@@ -1392,6 +1203,49 @@ try:
                 )
             else:
                 st.info("Data Age Mixing tidak ditemukan pada periode ini.")
+
+    # ==========================================
+    # TAB 6: REPORT HARIAN (H-1) -> PDF / PNG A4
+    # ==========================================
+    with tab6:
+        st.subheader("📄 Report Harian Produksi, QC & Kepatuhan")
+
+        # Acuan waktu WIB (server cloud biasanya berjalan di UTC)
+        report_date = (pd.Timestamp.now(tz="Asia/Jakarta") - pd.Timedelta(days=1)).date()
+        st.info(
+            f"Report dibuat untuk periode **H-1: {format_tanggal_id(report_date)}**. "
+            "Data diambil langsung dari Supabase untuk tanggal tersebut, tidak bergantung pada filter tanggal di sidebar. "
+            "Isi report: KPI Produksi, KPI QC (termasuk rata-rata Reject & Reproses Rate), rata-rata komponen OEE per kategori mesin, "
+            "ringkasan Compliance, dan Compliance Rate per user."
+        )
+
+        if st.button("🧾 Generate Report", type="primary", key="btn_generate_report"):
+            try:
+                with st.spinner("Menyusun report..."):
+                    # Rentang H-1 s.d. H0 agar logika tanggal kerja (cut-off 06:15) pada compliance lengkap
+                    r_qc, r_sic, r_oee, r_target = load_data_from_supabase(report_date - timedelta(days=1), report_date + timedelta(days=1))
+                    c_qc, c_sic, c_oee, _, _ = clean_data(r_qc, r_sic, r_oee)
+                    st.session_state["report_hasil"] = generate_report(report_date, c_oee, c_sic, c_qc, r_target)
+            except Exception as e_rep:
+                st.session_state.pop("report_hasil", None)
+                st.error(f"Gagal membuat report: {e_rep}")
+
+        hasil = st.session_state.get("report_hasil")
+        if hasil and hasil.get("tanggal") == report_date:
+            for w_ in hasil["data"].get("peringatan", []):
+                st.warning(w_)
+            nama_file = f"Daily_Report_{report_date.strftime('%Y-%m-%d')}"
+            col_d1, col_d2, _ = st.columns([1, 1, 3])
+            with col_d1:
+                st.download_button("⬇️ Download PDF (A4)", data=hasil["pdf"], file_name=f"{nama_file}.pdf",
+                                   mime="application/pdf", use_container_width=True)
+            with col_d2:
+                st.download_button("🖼️ Download Gambar (PNG)", data=hasil["png"], file_name=f"{nama_file}.png",
+                                   mime="image/png", use_container_width=True)
+            st.image(hasil["png"], caption=f"Pratinjau report {format_tanggal_id(report_date)}", use_container_width=True)
+        elif hasil:
+            st.caption("Report yang tersimpan berasal dari tanggal sebelumnya. Klik **Generate Report** untuk membuat report H-1 terbaru.")
+
 
 except Exception as e:
     st.error(f"Terjadi kesalahan pada aplikasi: {e}")
