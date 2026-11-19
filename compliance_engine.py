@@ -142,6 +142,7 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
     master_log = {}
     oee_batches_per_date = {}
     global_qc_map = {}
+    global_qc_users = {}   # {kunci unit QC: {nama inspector: jumlah baris}} -> semua inspector yang mengisi unit tsb
     
     total_qc_indiv, patuh_qc_indiv = 0, 0
     global_reproses, global_reject = 0, 0
@@ -276,6 +277,8 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             global_qc_map[qc_lookup_key]['lastStatus'] = status
             if op_qc != "-":
                 global_qc_map[qc_lookup_key]['user'] = op_qc
+                global_qc_users.setdefault(qc_lookup_key, {})
+                global_qc_users[qc_lookup_key][op_qc] = global_qc_users[qc_lookup_key].get(op_qc, 0) + 1
             
             global_reproses += reproses
             global_reject += reject
@@ -422,17 +425,26 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
                     'pic': item['operator']
                 })
 
+    # Kredit QC per user: bila satu batch+mesin diisi lebih dari satu inspector (mis. pergantian shift),
+    # SETIAP inspector yang mengisi mendapat kredit. Sebelumnya hanya penulis terakhir yang tercatat,
+    # sehingga inspector yang mengisi lebih awal "hilang" dari laporan compliance.
     for qc_key, qc_item in global_qc_map.items():
-        user_qc = qc_item['user']
-        if user_qc and user_qc != "-":
+        if is_qc_status_patuh(qc_item['lastStatus']):
+            kredit = 1.0
+        elif qc_item['rows'] > 1:
+            kredit = 0.7
+        else:
+            kredit = 0.0
+
+        peserta = list(global_qc_users.get(qc_key, {}).keys())
+        if not peserta and qc_item['user'] and qc_item['user'] != "-":
+            peserta = [qc_item['user']]
+
+        for user_qc in peserta:
             if user_qc not in qc_user_stats:
                 qc_user_stats[user_qc] = {'total': 0, 'patuh': 0}
             qc_user_stats[user_qc]['total'] += 1
-            
-            if is_qc_status_patuh(qc_item['lastStatus']):
-                qc_user_stats[user_qc]['patuh'] += 1
-            elif qc_item['rows'] > 1:
-                qc_user_stats[user_qc]['patuh'] += 0.7
+            qc_user_stats[user_qc]['patuh'] += kredit
 
     if dept_total_oee_sic > 0:
         skor_dept_oee_sic_str = f"{round((dept_patuh_oee_sic / dept_total_oee_sic) * 100)}% ({round(dept_patuh_oee_sic)}/{dept_total_oee_sic})"
