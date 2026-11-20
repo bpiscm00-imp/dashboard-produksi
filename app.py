@@ -16,6 +16,10 @@ from compliance_engine import (
     get_age_mixing as raw_get_age_mixing
 )
 from report_engine import generate_report, format_tanggal_id
+try:
+    from compliance_engine import ENGINE_VERSION
+except ImportError:   # compliance_engine.py versi lama (belum punya penanda versi)
+    ENGINE_VERSION = "LAMA - perlu diperbarui"
 from kpi_core import (
     ALIAS_JENIS_MESIN, normalize_jenis_mesin, format_line_number, get_real_subbrand,
     DEFAULT_TARGET_PER_JAM, build_target_dict, get_target_info, get_target_capacity,
@@ -365,6 +369,7 @@ st.title("🏭 Dashboard Cerdas Produksi, QC & Kepatuhan")
 
 try:
     st.sidebar.header("Filter Data Global")
+    st.sidebar.caption(f"⚙️ Versi engine compliance: {ENGINE_VERSION}")
     
     if st.sidebar.button("🔄 Sync / Refresh Data Terkini", use_container_width=True):
         st.cache_data.clear()
