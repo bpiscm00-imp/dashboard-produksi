@@ -8,6 +8,8 @@ import numpy as np
 # 1. HELPER NORMALISASI & TANGGAL FISKAL
 # ============================================================
 
+ENGINE_VERSION = "2026-11-20 | QC multi-inspector + batch O/0"
+
 def parse_time_with_date(dt_base, time_raw):
     """
     Menggabungkan tanggal dari timestamp acuan dengan string jam operasional 
@@ -98,6 +100,14 @@ def normalisasi_batch(batch_mentah):
     b = re.sub(r'^[\'\"]|[\'\"]$', '', b)
     return b
 
+def fold_batch(batch_norm):
+    """
+    Kunci PENCOCOKAN batch antar log (OEE/SIC/QC): huruf 'O' dan angka '0' dianggap sama.
+    Operator sering menulis batch yang sama dengan ejaan berbeda (mis. 1B003K0126 vs 1BO03K0126),
+    sehingga batch dinyatakan 'QC belum diisi' padahal sudah. Hanya untuk kunci; tampilan batch tidak diubah.
+    """
+    return str(batch_norm).replace('O', '0')
+
 def normalisasi_operator(nama_mentah):
     if not nama_mentah or pd.isna(nama_mentah):
         return "-"
@@ -169,9 +179,10 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
         if not batch:
             continue
             
+        bkey = fold_batch(batch)
         if tgl_acuan not in oee_batches_per_date:
             oee_batches_per_date[tgl_acuan] = {}
-        oee_batches_per_date[tgl_acuan][batch] = True
+        oee_batches_per_date[tgl_acuan][bkey] = True
         
         if start_date_str <= tgl_acuan <= end_date_str:
             raw_mesin_str = extract_full_machine_name(row)
@@ -185,7 +196,7 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             jam_mulai = parse_time_with_date(ts_oee, j_mulai_raw)
             selesai = parse_time_with_date(ts_oee, j_selesai_raw)
             
-            key = f"{tgl_acuan}_{batch}_{mesin}"
+            key = f"{tgl_acuan}_{bkey}_{mesin}"
             
             if key not in master_log:
                 master_log[key] = {
@@ -216,7 +227,8 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
         if not batch:
             continue
             
-        fiscal_date_sic = get_fiscal_date(ts, oee_batches_per_date, oee_batches_per_date, batch)
+        bkey = fold_batch(batch)
+        fiscal_date_sic = get_fiscal_date(ts, oee_batches_per_date, oee_batches_per_date, bkey)
         
         if fiscal_date_sic and start_date_str <= fiscal_date_sic <= end_date_str:
             raw_mesin_str = extract_full_machine_name(row)
@@ -225,7 +237,7 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             op = normalisasi_operator(row.get('OPERATOR', row.get('operator', row.get('NAMA_OPERATOR'))))
             status = str(row.get('STATUS_ALUR', row.get('status_alur', ''))).strip()
             
-            key = f"{fiscal_date_sic}_{batch}_{mesin}"
+            key = f"{fiscal_date_sic}_{bkey}_{mesin}"
             
             if key not in master_log:
                 master_log[key] = {
@@ -256,7 +268,8 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
         if not batch:
             continue
             
-        fiscal_date_qc = get_fiscal_date(ts_qc, oee_batches_per_date, oee_batches_per_date, batch)
+        bkey = fold_batch(batch)
+        fiscal_date_qc = get_fiscal_date(ts_qc, oee_batches_per_date, oee_batches_per_date, bkey)
         
         if fiscal_date_qc and start_date_str <= fiscal_date_qc <= end_date_str:
             raw_mesin_str = extract_full_machine_name(row)
@@ -270,7 +283,7 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             if is_qc_status_patuh(status):
                 patuh_qc_indiv += 1
                 
-            qc_lookup_key = f"{fiscal_date_qc}_{batch}_{mesin}"
+            qc_lookup_key = f"{fiscal_date_qc}_{bkey}_{mesin}"
             if qc_lookup_key not in global_qc_map:
                 global_qc_map[qc_lookup_key] = {'terisi': True, 'rows': 0, 'lastStatus': status, 'user': op_qc}
             global_qc_map[qc_lookup_key]['rows'] += 1
@@ -293,7 +306,7 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
     total_batch_akurasi_diuji, total_persentase_akurasi = 0, 0
 
     for key, item in master_log.items():
-        qc_key = f"{item['tanggal']}_{item['batch']}_{item['mesin']}"
+        qc_key = f"{item['tanggal']}_{fold_batch(item['batch'])}_{item['mesin']}"
         has_qc_data = qc_key in global_qc_map
         if has_qc_data:
             item['picQc'] = global_qc_map[qc_key]['user']
