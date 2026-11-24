@@ -38,8 +38,10 @@ def load_data_from_supabase(start_date, end_date):
     """
     Menarik data dari Supabase PostgreSQL dengan Server-Side Date Filtering.
     """
-    start_str = f"{start_date} 00:00:00"
-    end_str = f"{end_date} 23:59:59"
+    # Filter tanggal dibaca sebagai WIB (+07:00). Kolom timestamp di Supabase bertipe timestamptz (disimpan UTC);
+    # tanpa offset, tanggal akan dibaca UTC sehingga bergeser 7 jam dari waktu penginputan sebenarnya.
+    start_str = f"{start_date} 00:00:00+07:00"
+    end_str = f"{end_date} 23:59:59+07:00"
 
     query_oee = """
         SELECT 
@@ -994,7 +996,8 @@ try:
                     st.markdown("**❌ Kelalaian Input Form / Late Log (>30 Menit):**")
                     for k in card_user['kelalaianInput']:
                         tgl_k = f" ({k['tanggal']})" if k.get('tanggal') else ""
-                        st.error(f"• **{k['mesin']}**{tgl_k} (Batch: `{k['batch']}`)\n  ↳ _{k['keterangan']}_")
+                        _cat = f"\n  ℹ️ {k['catatan']}" if k.get('catatan') else ""
+                        st.error(f"• **{k['mesin']}**{tgl_k} (Batch: `{k['batch']}`)\n  ↳ _{k['keterangan']}_{_cat}")
                         
                 if card_user['selisihOutput']:
                     st.markdown("**⚠️ Selisih Output Data (OEE vs SIC):**")
