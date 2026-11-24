@@ -8,7 +8,7 @@ import numpy as np
 # 1. HELPER NORMALISASI & TANGGAL FISKAL
 # ============================================================
 
-ENGINE_VERSION = "2026-11-20 | QC multi-inspector + batch O/0"
+ENGINE_VERSION = "2026-11-25 | QC multi-inspector + batch O/0,I/1 + diagnosis SIC/OEE kosong + toleransi isi form setelah cutoff"
 
 def parse_time_with_date(dt_base, time_raw):
     """
@@ -102,11 +102,11 @@ def normalisasi_batch(batch_mentah):
 
 def fold_batch(batch_norm):
     """
-    Kunci PENCOCOKAN batch antar log (OEE/SIC/QC): huruf 'O' dan angka '0' dianggap sama.
-    Operator sering menulis batch yang sama dengan ejaan berbeda (mis. 1B003K0126 vs 1BO03K0126),
-    sehingga batch dinyatakan 'QC belum diisi' padahal sudah. Hanya untuk kunci; tampilan batch tidak diubah.
+    Kunci PENCOCOKAN batch antar log (OEE/SIC/QC): huruf 'O' = angka '0' dan huruf 'I' = angka '1' dianggap sama.
+    Operator sering menulis batch yang sama dengan ejaan berbeda (mis. 1B003K0126 vs 1BO03K0126, 1UM05J0126 vs IUM05J0126),
+    sehingga batch dinyatakan 'belum diisi' padahal sudah. Hanya untuk kunci; tampilan batch tidak diubah.
     """
-    return str(batch_norm).replace('O', '0')
+    return str(batch_norm).replace('O', '0').replace('I', '1')
 
 def normalisasi_operator(nama_mentah):
     if not nama_mentah or pd.isna(nama_mentah):
@@ -125,6 +125,16 @@ def is_qc_status_patuh(status_raw):
     s = str(status_raw).strip().upper()
     valid_keywords = ["SELESAI", "AKHIR", "PASSED", "PASS", "OK", "RELEASED"]
     return any(kw in s for kw in valid_keywords)
+
+# Toleransi pengisian form SETELAH batas hari kerja (06:15). Operator sering mengisi OEE/QC beberapa menit
+# setelah cutoff (mis. 06:19) untuk batch yang SIC-nya berada di hari kerja sebelumnya.
+GRACE_PASCA_CUTOFF_MENIT = 75
+
+
+def dalam_grace_pasca_cutoff(ts):
+    menit = ts.hour * 60 + ts.minute - (6 * 60 + 15)
+    return 0 <= menit < GRACE_PASCA_CUTOFF_MENIT
+
 
 def get_fiscal_date(dt_ts, oee_batches_today, oee_batches_yesterday, batch_no):
     if pd.isna(dt_ts) or dt_ts is None:
@@ -153,6 +163,22 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
     oee_batches_per_date = {}
     global_qc_map = {}
     global_qc_users = {}   # {kunci unit QC: {nama inspector: jumlah baris}} -> semua inspector yang mengisi unit tsb
+    sic_batch_per_mesin = {}   # {(tanggal, mesin): {batch: operator}} -> untuk diagnosis 'SIC Kosong'
+    oee_per_batch = {}         # {bkey: [(tanggal kerja, mesin, ts input)]} -> untuk diagnosis 'OEE Kosong'
+
+    # Pra-proses: tanggal kerja SIC per (batch, mesin) -- dipakai untuk toleransi isi OEE/QC setelah cutoff
+    sic_tanggal_per_bm = {}
+    for _r in df_sic.to_dict('records'):
+        _ts = pd.to_datetime(_r.get('TIMESTAMP', _r.get('timestamp')), errors='coerce')
+        if pd.isna(_ts):
+            continue
+        _b = normalisasi_batch(_r.get('NO_BATCH', _r.get('no_batch')))
+        if not _b:
+            continue
+        _sebelum = (_ts.hour < 6) or (_ts.hour == 6 and _ts.minute < 15)
+        _tgl = (_ts - timedelta(days=1)).strftime('%Y-%m-%d') if _sebelum else _ts.strftime('%Y-%m-%d')
+        _m = normalisasi_mesin(extract_full_machine_name(_r))
+        sic_tanggal_per_bm.setdefault((fold_batch(_b), _m), set()).add(_tgl)
     
     total_qc_indiv, patuh_qc_indiv = 0, 0
     global_reproses, global_reject = 0, 0
@@ -180,6 +206,15 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             continue
             
         bkey = fold_batch(batch)
+
+        mesin_oee = normalisasi_mesin(extract_full_machine_name(row))
+        if tgl_acuan == ts_oee_str and dalam_grace_pasca_cutoff(ts_oee):
+            _prev = (ts_oee - timedelta(days=1)).strftime('%Y-%m-%d')
+            _tgl_sic = sic_tanggal_per_bm.get((bkey, mesin_oee), set())
+            if _prev in _tgl_sic and tgl_acuan not in _tgl_sic:
+                tgl_acuan = _prev     # OEE diisi sesaat setelah cutoff untuk batch yang SIC-nya di hari kerja sebelumnya
+
+        oee_per_batch.setdefault(bkey, []).append((tgl_acuan, mesin_oee, ts_oee))
         if tgl_acuan not in oee_batches_per_date:
             oee_batches_per_date[tgl_acuan] = {}
         oee_batches_per_date[tgl_acuan][bkey] = True
@@ -247,6 +282,7 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
                     'sicRows': 0, 'sicLastStatus': "", 'jamMulaiOEE': None, 'tsSICPertama': None
                 }
                 
+            sic_batch_per_mesin.setdefault((fiscal_date_sic, mesin), {})[batch] = op
             master_log[key]['sic'] = True
             master_log[key]['sicOutput'] += output_jam
             master_log[key]['picSic'] = op
@@ -270,6 +306,11 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
             
         bkey = fold_batch(batch)
         fiscal_date_qc = get_fiscal_date(ts_qc, oee_batches_per_date, oee_batches_per_date, bkey)
+        if fiscal_date_qc == ts_qc.strftime('%Y-%m-%d') and dalam_grace_pasca_cutoff(ts_qc):
+            _m_qc = normalisasi_mesin(extract_full_machine_name(row))
+            _prev_qc = (ts_qc - timedelta(days=1)).strftime('%Y-%m-%d')
+            if f"{fiscal_date_qc}_{bkey}_{_m_qc}" not in master_log and f"{_prev_qc}_{bkey}_{_m_qc}" in master_log:
+                fiscal_date_qc = _prev_qc
         
         if fiscal_date_qc and start_date_str <= fiscal_date_qc <= end_date_str:
             raw_mesin_str = extract_full_machine_name(row)
@@ -382,13 +423,34 @@ def audit_compliance_range(df_oee, df_sic, df_qc, start_date_str, end_date_str):
                     
             teks_pic_log = f"{teks_missing} {teks_present}".strip()
             
+            catatan_sic = ""
+            if not item['sic']:
+                tercatat = sic_batch_per_mesin.get((item['tanggal'], item['mesin']), {})
+                if tercatat:
+                    daftar = ", ".join(f"{b} (oleh {p})" for b, p in list(tercatat.items())[:3])
+                    catatan_sic = f"SIC mesin ini pada tanggal tsb hanya tercatat untuk batch: {daftar}. Jika batch ini seharusnya sama, periksa penulisan No Batch di SIC."
+                else:
+                    catatan_sic = "Tidak ada satu pun input SIC pada mesin ini di tanggal tsb."
+
+            catatan_oee = ""
+            if not item['oee']:
+                _bk = fold_batch(normalisasi_batch(item['batch']))
+                _lain = [(t, m, ts) for (t, m, ts) in oee_per_batch.get(_bk, []) if not (t == item['tanggal'] and m == item['mesin'])]
+                if _lain:
+                    _uniq = list(dict.fromkeys(f"{m} (tgl kerja {t}, diinput {ts.strftime('%d/%m %H:%M')})" for t, m, ts in _lain))[:3]
+                    catatan_oee = "OEE batch ini tidak ada untuk mesin/tanggal ini, tetapi tercatat untuk: " + "; ".join(_uniq) + ". Periksa nama mesin atau tanggal produksi pada form OEE."
+                else:
+                    catatan_oee = "Tidak ada satu pun input OEE untuk batch ini."
+            catatan_gabungan = " | ".join(x for x in (catatan_sic, catatan_oee) if x)
+
             mismatch_list.append({
                 'tipe': "KELALAIAN_INPUT",
                 'tanggal': item['tanggal'],
                 'mesin': item['mesin'],
                 'batch': item['batch'],
                 'keterangan': ket,
-                'pic': teks_pic_log
+                'pic': teks_pic_log,
+                'catatan': catatan_gabungan
             })
 
         # Audit Late Log (>30 Menit)
@@ -538,7 +600,8 @@ def get_rapport_cards_range(df_oee, df_sic, df_qc, start_date_str, end_date_str)
                 'mesin': item['mesin'],
                 'batch': item['batch'],
                 'keterangan': ket_prod or "Form Produksi Kosong",
-                'pic': item['pic']
+                'pic': item['pic'],
+                'catatan': item.get('catatan', '')
             }
 
             text_pic = item.get('pic', '')
@@ -626,6 +689,8 @@ def build_wa_msg_operator(card_data, periode_str):
         for k in card_data['kelalaianInput']:
             tgl_k = f" ({k['tanggal']})" if k.get('tanggal') else ""
             msg += f" • {k['mesin']}{tgl_k} | Batch: {k['batch']}\n   ↳ _{k['keterangan']}_\n"
+            if k.get('catatan'):
+                msg += f"   ℹ️ {k['catatan']}\n"
         msg += "\n"
 
     if card_data.get('selisihOutput'):
